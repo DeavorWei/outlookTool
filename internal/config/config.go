@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 )
@@ -23,8 +24,14 @@ type Config struct {
 }
 
 func DefaultConfig() *Config {
+	exePath, err := os.Executable()
+	if err != nil {
+		exePath = "."
+	}
+	defaultRoot := filepath.Join(filepath.Dir(exePath), "OutlookArchives")
+
 	return &Config{
-		PSTRootPath:        "",
+		PSTRootPath:        defaultRoot,
 		PollIntervalMin:    10,
 		SafeDelayMin:       10,
 		MaxBatchSize:       500,
@@ -46,6 +53,7 @@ func LoadConfig(path string) (*Config, error) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			// 如果配置文件不存在，则创建默认配置文件
+			_ = os.MkdirAll(config.PSTRootPath, 0755)
 			err = SaveConfig(path, config)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to save default config to %s: %v. Using in-memory default.\n", path, err)

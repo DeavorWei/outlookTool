@@ -83,14 +83,22 @@ func (a *Archiver) Archive(ctx context.Context, opts ArchiveOptions) (*ArchiveRe
 			return res, ctx.Err()
 		}
 
-		moved, failed := a.processFolder(ctx, folder, opts, res)
+		var moved, failed int
+		_ = a.bridge.Submit(func() error {
+			moved, failed = a.processFolder(ctx, folder, opts, res)
+			return nil
+		})
 		res.TotalMoved += moved
 		res.TotalFailed += failed
 
 		if opts.MaxBatchSize > 0 && res.TotalMoved >= opts.MaxBatchSize {
 			a.logger.Info("Reached max batch size, stopping archive")
 			for j := idx + 1; j < len(folders); j++ {
-				count := a.countMatchedItems(folders[j], opts)
+				var count int
+				_ = a.bridge.Submit(func() error {
+					count = a.countMatchedItems(folders[j], opts)
+					return nil
+				})
 				res.TotalMatched += count
 				res.TotalSkipped += count
 			}

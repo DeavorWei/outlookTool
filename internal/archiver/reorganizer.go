@@ -209,7 +209,10 @@ func (r *Reorganizer) processPST(ctx context.Context, pstPath string, res *Recti
 		if ctx.Err() != nil {
 			return
 		}
-		r.processPSTFolder(ctx, folder, currentPSTName, res, forceMigrate, progressCb)
+		_ = r.bridge.Submit(func() error {
+			r.processPSTFolder(ctx, folder, currentPSTName, res, forceMigrate, progressCb)
+			return nil
+		})
 	}
 }
 
