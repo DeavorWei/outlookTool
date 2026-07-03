@@ -171,6 +171,7 @@ func (s *Scheduler) TriggerOnce(ctx context.Context) error {
 	opts := archiver.ArchiveOptions{
 		MaxBatchSize: s.cfg.MaxBatchSize,
 		SafeDelay:    time.Duration(s.cfg.SafeDelayMin) * time.Minute,
+		RetainDays:   s.cfg.RetainDays,
 		MoveInterval: time.Duration(s.cfg.MoveIntervalMs) * time.Millisecond,
 		DryRun:       s.cfg.DryRun,
 		CopyOnly:     s.cfg.CopyOnly,

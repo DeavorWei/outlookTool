@@ -30,6 +30,7 @@ type ArchiveResult struct {
 type ArchiveOptions struct {
 	MaxBatchSize int           // 0 = 不限制（全量整理模式）
 	SafeDelay    time.Duration // 0 = 不延迟（全量整理模式）
+	RetainDays   int           // 0 = 不保留最近的邮件，全部归档
 	MoveInterval time.Duration
 	DryRun       bool          // true = 仅日志，不执行 Move
 	CopyOnly     bool          // true = 仅复制，不执行 Move
@@ -56,8 +57,16 @@ func BuildRestrictFilter(timeField string, cutoffTime time.Time) string {
 	return fmt.Sprintf("[%s] < '%s' AND [MessageClass] = 'IPM.Note'", timeField, timeStr)
 }
 
-func calcCutoffTime(safeDelay time.Duration) time.Time {
-	return time.Now().Add(-safeDelay)
+func calcCutoffTime(safeDelay time.Duration, retainDays int) time.Time {
+	now := time.Now()
+	cutoff := now.Add(-safeDelay)
+	if retainDays > 0 {
+		retainCutoff := now.AddDate(0, 0, -retainDays)
+		if retainCutoff.Before(cutoff) {
+			cutoff = retainCutoff
+		}
+	}
+	return cutoff
 }
 
 // Archive 执行一次常规归档
@@ -133,10 +142,10 @@ func (a *Archiver) processFolder(ctx context.Context, folder outlook.FolderInfo,
 	defer comutil.SafeRelease(items)
 
 	var filter string
-	if opts.SafeDelay == 0 {
+	if opts.SafeDelay == 0 && opts.RetainDays == 0 {
 		filter = "[MessageClass] = 'IPM.Note'"
 	} else {
-		cutoffTime := calcCutoffTime(opts.SafeDelay)
+		cutoffTime := calcCutoffTime(opts.SafeDelay, opts.RetainDays)
 		filter = BuildRestrictFilter(folder.TimeField, cutoffTime)
 	}
 
@@ -310,10 +319,10 @@ func (a *Archiver) countMatchedItems(folder outlook.FolderInfo, opts ArchiveOpti
 	defer comutil.SafeRelease(items)
 
 	var filter string
-	if opts.SafeDelay == 0 {
+	if opts.SafeDelay == 0 && opts.RetainDays == 0 {
 		filter = "[MessageClass] = 'IPM.Note'"
 	} else {
-		cutoffTime := calcCutoffTime(opts.SafeDelay)
+		cutoffTime := calcCutoffTime(opts.SafeDelay, opts.RetainDays)
 		filter = BuildRestrictFilter(folder.TimeField, cutoffTime)
 	}
 

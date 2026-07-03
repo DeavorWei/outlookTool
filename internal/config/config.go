@@ -13,6 +13,7 @@ type Config struct {
 	PSTRootPath        string   `yaml:"pst_root_path"`
 	PollIntervalMin    int      `yaml:"poll_interval_minutes"`
 	SafeDelayMin       int      `yaml:"safe_delay_minutes"`
+	RetainDays         int      `yaml:"retain_days"`
 	MaxBatchSize       int      `yaml:"max_batch_size"`
 	ArchiveMode        string   `yaml:"archive_mode"` // "all" | "list"
 	ExcludeFolders     []string `yaml:"exclude_folders"`
@@ -36,6 +37,7 @@ func DefaultConfig() *Config {
 		PSTRootPath:        defaultRoot,
 		PollIntervalMin:    10,
 		SafeDelayMin:       10,
+		RetainDays:         30,
 		MaxBatchSize:       500,
 		ArchiveMode:        "all",
 		ExcludeFolders:     []string{},
@@ -105,6 +107,11 @@ poll_interval_minutes: 10
 # 作用: 仅处理早于“当前时间减去安全延迟时间”的邮件。这是为了防止处理正在与 Exchange 服务器同步的邮件，避免引发 RPC 锁死。
 # 示例: 10 (表示现在是 10:30 的话，只处理 10:20 之前的邮件)
 safe_delay_minutes: 10
+
+# retain_days: 保留最近邮件不归档的天数
+# 作用: 默认跳过最近 N 天的邮件不进行归档，以方便用户在主邮箱查阅近期邮件。设置为 0 则归档所有符合条件的邮件。
+# 示例: 30 (表示跳过最近 30 天的邮件，只归档 30 天以前的历史邮件)
+retain_days: 30
 
 # max_batch_size: 单次最大处理邮件数
 # 作用: 每次轮询任务中，最多移动多少封邮件。该额度由所有文件夹共享。限制批次可以防止瞬间资源占用过高导致 Outlook 假死。
@@ -184,6 +191,9 @@ func ValidateConfig(cfg *Config) error {
 	}
 	if cfg.SafeDelayMin < 0 {
 		return errors.New("safe_delay_minutes must be >= 0")
+	}
+	if cfg.RetainDays < 0 {
+		return errors.New("retain_days must be >= 0")
 	}
 	if cfg.MaxBatchSize < 0 {
 		return errors.New("max_batch_size must be >= 0")

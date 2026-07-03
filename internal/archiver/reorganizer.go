@@ -60,6 +60,7 @@ func (r *Reorganizer) Reorganize(ctx context.Context, progressCb func(phase, pro
 	phase1Opts := ArchiveOptions{
 		MaxBatchSize: 0, // 不限制批次
 		SafeDelay:    0, // 不延迟
+		RetainDays:   r.cfg.RetainDays, // 全量整理阶段一（主邮箱归档）依然保留最近 N 天
 		MoveInterval: time.Duration(r.cfg.MoveIntervalMs) * time.Millisecond,
 		DryRun:       r.cfg.DryRun,
 		CopyOnly:     r.cfg.CopyOnly,
