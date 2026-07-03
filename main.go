@@ -63,7 +63,7 @@ func main() {
 	defer sched.Stop()
 
 	// 7. 初始化并运行系统托盘 (会阻塞主线程)
-	tray.InitTray(sched, cfg)
+	tray.InitTray(sched, cfg, zlog)
 
 	zlog.Info("正在停止后台任务...")
 	cancel() // 取消 context，通知各组件停止

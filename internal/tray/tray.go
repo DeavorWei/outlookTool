@@ -13,6 +13,7 @@ import (
 	"outlook-archiver/internal/config"
 	"outlook-archiver/internal/logger"
 	"outlook-archiver/internal/monitor"
+	"go.uber.org/zap"
 	"outlook-archiver/internal/registry"
 	"outlook-archiver/internal/scheduler"
 )
@@ -39,14 +40,14 @@ var (
 )
 
 // InitTray 初始化并运行系统托盘
-func InitTray(sched *scheduler.Scheduler, cfg *config.Config) {
+func InitTray(sched *scheduler.Scheduler, cfg *config.Config, zlog *zap.Logger) {
 	trayCtx, trayCancel = context.WithCancel(context.Background())
 	systray.Run(func() {
-		onReady(sched, cfg)
+		onReady(sched, cfg, zlog)
 	}, onExit)
 }
 
-func onReady(sched *scheduler.Scheduler, cfg *config.Config) {
+func onReady(sched *scheduler.Scheduler, cfg *config.Config, zlog *zap.Logger) {
 	systray.SetIcon(normalIcon)
 	systray.SetTooltip("Outlook Auto-Archiver - 运行中")
 
@@ -55,6 +56,7 @@ func onReady(sched *scheduler.Scheduler, cfg *config.Config) {
 	systray.AddSeparator()
 	mOpenLog := systray.AddMenuItem("打开日志目录", "")
 	mOpenConfig := systray.AddMenuItem("打开配置文件", "")
+	mReloadConfig := systray.AddMenuItem("重新加载配置", "修改配置文件后点击生效")
 
 	// 检查当前注册表状态
 	autoStartEnabled := false
@@ -79,7 +81,8 @@ func onReady(sched *scheduler.Scheduler, cfg *config.Config) {
 					continue
 				}
 				state := sched.GetState()
-				diskStatus, _ := monitor.CheckDiskSpace(cfg.PSTRootPath)
+				safeCfg := sched.GetConfigCopy()
+				diskStatus, _ := monitor.CheckDiskSpace(safeCfg.PSTRootPath)
 				switch state {
 				case scheduler.StateIdle, scheduler.StatePaused:
 					if diskStatus == monitor.DiskCritical {
@@ -94,6 +97,7 @@ func onReady(sched *scheduler.Scheduler, cfg *config.Config) {
 					}
 					mArchiveOnce.Enable()
 					mReorganize.Enable()
+					mReloadConfig.Enable()
 				case scheduler.StateArchiving:
 					if diskStatus == monitor.DiskCritical {
 						systray.SetIcon(errorIcon)
@@ -105,11 +109,13 @@ func onReady(sched *scheduler.Scheduler, cfg *config.Config) {
 					systray.SetTooltip("归档中...")
 					mArchiveOnce.Disable()
 					mReorganize.Enable()
+					mReloadConfig.Disable()
 				case scheduler.StateReorganizing:
 					systray.SetIcon(workingIcon)
 					// Tooltip 会在 TriggerReorganize 的 progressCb 中实时更新，这里不覆盖。
 					mArchiveOnce.Disable()
 					mReorganize.Disable()
+					mReloadConfig.Disable()
 				}
 			}
 		}
@@ -142,6 +148,20 @@ func onReady(sched *scheduler.Scheduler, cfg *config.Config) {
 					configPath := filepath.Join(filepath.Dir(exeDir), "config.yaml")
 					exec.Command("cmd", "/c", "start", "", configPath).Start()
 				}
+			case <-mReloadConfig.ClickedCh:
+				if sched != nil {
+					exeDir, err := os.Executable()
+					if err == nil {
+						configPath := filepath.Join(filepath.Dir(exeDir), "config.yaml")
+						err = sched.ReloadConfig(configPath)
+						if err != nil {
+							zlog.Error("重新加载配置失败", zap.Error(err))
+							systray.SetTooltip("Outlook Auto-Archiver - 加载配置失败")
+						} else {
+							zlog.Info("重新加载配置成功")
+						}
+					}
+				}
 			case <-mAutoStart.ClickedCh:
 				if mAutoStart.Checked() {
 					err := registry.SetAutoStart(false)
@@ -156,7 +176,7 @@ func onReady(sched *scheduler.Scheduler, cfg *config.Config) {
 				}
 			case <-mQuit.ClickedCh:
 				if sched != nil && sched.GetState() == scheduler.StateReorganizing {
-					fmt.Println("全量整理中，禁止退出")
+					zlog.Warn("全量整理中，禁止退出")
 					continue
 				}
 				systray.Quit()

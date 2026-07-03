@@ -30,6 +30,45 @@ type ProgressInfo struct {
 	CurrentPST string
 }
 
+// ConfigProvider 允许托盘安全获取当前生效的配置副本
+func (s *Scheduler) GetConfigCopy() config.Config {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return *s.cfg
+}
+
+// ReloadConfig 从文件重新加载配置
+func (s *Scheduler) ReloadConfig(path string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	
+	if s.state != StateIdle {
+		return fmt.Errorf("当前状态不可重新加载配置，请在空闲时重试")
+	}
+
+	newCfg, err := config.LoadConfig(path)
+	if err != nil {
+		return err
+	}
+
+	// 就地更新所有字段，使得持有 cfg 指针的其他组件(archiver/reorg)能读取到新值
+	*s.cfg = *newCfg
+
+	// 更新日志级别等如果需要的话（暂时略过复杂的 logger 热更）
+	
+	// 重置定时器间隔
+	if s.ticker != nil {
+		interval := time.Duration(s.cfg.PollIntervalMin) * time.Minute
+		if interval <= 0 {
+			interval = 60 * time.Minute
+		}
+		s.ticker.Reset(interval)
+	}
+
+	s.logger.Info("配置文件重新加载成功")
+	return nil
+}
+
 type Scheduler struct {
 	cfg      *config.Config
 	archiver *archiver.Archiver
