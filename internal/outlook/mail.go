@@ -164,3 +164,69 @@ func (b *COMBridge) GetEntryID(obj *ole.IDispatch) (string, error) {
 	})
 	return entryID, err
 }
+
+// GetFirst 获取集合中的第一个项目
+func (b *COMBridge) GetFirst(collection *ole.IDispatch) (*ole.IDispatch, error) {
+	var item *ole.IDispatch
+	err := b.Submit(func() error {
+		itemVar, err := comutil.SafeCallMethod(collection, "GetFirst")
+		if err != nil {
+			return err
+		}
+		if itemVar.Value() != nil {
+			item = itemVar.ToIDispatch()
+			if item != nil {
+				item.AddRef()
+			}
+		}
+		itemVar.Clear()
+		return nil
+	})
+	return item, err
+}
+
+// GetNext 获取集合中的下一个项目
+func (b *COMBridge) GetNext(collection *ole.IDispatch) (*ole.IDispatch, error) {
+	var item *ole.IDispatch
+	err := b.Submit(func() error {
+		itemVar, err := comutil.SafeCallMethod(collection, "GetNext")
+		if err != nil {
+			return err
+		}
+		if itemVar.Value() != nil {
+			item = itemVar.ToIDispatch()
+			if item != nil {
+				item.AddRef()
+			}
+		}
+		itemVar.Clear()
+		return nil
+	})
+	return item, err
+}
+
+// GetItemFromID 根据 EntryID 获取邮件实例
+func (b *COMBridge) GetItemFromID(entryID string) (*ole.IDispatch, error) {
+	var item *ole.IDispatch
+	err := b.Submit(func() error {
+		ns, err := b.getNamespace()
+		if err != nil {
+			return err
+		}
+		defer comutil.SafeRelease(ns)
+
+		itemVar, err := comutil.SafeCallMethod(ns, "GetItemFromID", entryID)
+		if err != nil {
+			return err
+		}
+		if itemVar.Value() != nil {
+			item = itemVar.ToIDispatch()
+			if item != nil {
+				item.AddRef()
+			}
+		}
+		itemVar.Clear()
+		return nil
+	})
+	return item, err
+}

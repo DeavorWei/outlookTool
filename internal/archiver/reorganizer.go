@@ -239,53 +239,55 @@ func (r *Reorganizer) processPSTFolder(ctx context.Context, folder outlook.Folde
 	}
 	defer comutil.SafeRelease(restricted)
 
-	countVar, err := comutil.SafeGetProperty(restricted, "Count")
-	if err != nil {
-		return
-	}
-	count := 0
-	if countVar.Value() != nil {
-		switch v := countVar.Value().(type) {
-		case int32:
-			count = int(v)
-		case int:
-			count = v
-		case int16:
-			count = int(v)
-		case float64:
-			count = int(v)
-		case int64:
-			count = int(v)
+
+
+	var metas []mailMeta
+	item, _ := r.bridge.GetFirst(restricted)
+	for item != nil {
+		if ctx.Err() != nil {
+			break
 		}
+		
+		entryID, errID := r.bridge.GetEntryID(item)
+		if errID == nil && entryID != "" {
+			subject := r.bridge.GetSubject(item)
+			mailTime, errTime := r.bridge.GetMailTime(item, folder.TimeField)
+			if errTime == nil {
+				metas = append(metas, mailMeta{
+					entryID: entryID,
+					subject: subject,
+					time:    mailTime,
+				})
+			} else {
+				r.logger.Warn("Failed to get mail time in snapshot", zap.String("subject", subject), zap.Error(errTime))
+			}
+		} else {
+			r.logger.Warn("Failed to get EntryID in snapshot", zap.Error(errID))
+		}
+		
+		nextItem, _ := r.bridge.GetNext(restricted)
+		comutil.SafeRelease(item)
+		item = nextItem
+	}
+	if item != nil {
+		comutil.SafeRelease(item)
 	}
 
-	for i := count; i >= 1; i-- {
+	for i := len(metas) - 1; i >= 0; i-- {
+		meta := metas[i]
 		if ctx.Err() != nil {
 			break
 		}
 
-		itemVar, err := comutil.SafeCallMethod(restricted, "Item", i)
-		if err != nil {
+		mailItem, err := r.bridge.GetItemFromID(meta.entryID)
+		if err != nil || mailItem == nil {
+			r.logger.Warn("Failed to get item by EntryID", zap.String("subject", meta.subject), zap.Error(err))
 			res.TotalFailed++
 			continue
 		}
-		item := itemVar.ToIDispatch()
-		if item == nil {
-			res.TotalFailed++
-			continue
-		}
-		itemRef := comutil.NewCOMRef(item, fmt.Sprintf("mail_%d", i))
+		itemRef := comutil.NewCOMRef(mailItem, "mail_"+meta.entryID)
 
-		subject := r.bridge.GetSubject(itemRef.Dispatch())
-		mailTime, err := r.bridge.GetMailTime(itemRef.Dispatch(), folder.TimeField)
-		if err != nil {
-			r.logger.Warn("获取邮件时间失败", zap.String("subject", subject), zap.Error(err))
-			itemRef.Release()
-			res.TotalFailed++
-			continue
-		}
-
-		quarter := router.CalcQuarter(mailTime)
+		quarter := router.CalcQuarter(meta.time)
 		targetPSTName := quarter.PSTFileName()
 
 		// 判断是否需要移动
@@ -308,7 +310,7 @@ func (r *Reorganizer) processPSTFolder(ctx context.Context, folder outlook.Folde
 
 		if r.cfg.DryRun {
 			r.logger.Info("[DRY RUN] 会进行纠偏/迁移",
-				zap.String("subject", subject),
+				zap.String("subject", meta.subject),
 				zap.String("source_pst", currentPSTName),
 				zap.String("target_pst", targetPSTName),
 			)
@@ -345,7 +347,7 @@ func (r *Reorganizer) processPSTFolder(ctx context.Context, folder outlook.Folde
 
 		err = r.bridge.MoveItem(itemRef.Dispatch(), targetFolder)
 		if err != nil {
-			r.logger.Error("移动纠偏邮件失败", zap.String("subject", subject), zap.Error(err))
+			r.logger.Error("移动纠偏邮件失败", zap.String("subject", meta.subject), zap.Error(err))
 			res.TotalFailed++
 		} else {
 			if forceMigrate {

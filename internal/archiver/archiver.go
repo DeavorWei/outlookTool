@@ -105,9 +105,14 @@ func (a *Archiver) Archive(ctx context.Context, opts ArchiveOptions) (*ArchiveRe
 			break
 		}
 	}
-
 	res.Duration = time.Since(start)
 	return res, nil
+}
+
+type mailMeta struct {
+	entryID string
+	subject string
+	time    time.Time
 }
 
 func (a *Archiver) processFolder(ctx context.Context, folder outlook.FolderInfo, opts ArchiveOptions, res *ArchiveResult) (int, int) {
@@ -170,46 +175,63 @@ func (a *Archiver) processFolder(ctx context.Context, folder outlook.FolderInfo,
 	}
 	res.TotalMatched += count
 
-	for i := count; i >= 1; i-- {
+	var metas []mailMeta
+	item, _ := a.bridge.GetFirst(restricted)
+	for item != nil {
 		if ctx.Err() != nil {
-			res.TotalSkipped += i
+			break
+		}
+		
+		entryID, errID := a.bridge.GetEntryID(item)
+		if errID == nil && entryID != "" {
+			subject := a.bridge.GetSubject(item)
+			mailTime, errTime := a.bridge.GetMailTime(item, folder.TimeField)
+			if errTime == nil {
+				metas = append(metas, mailMeta{
+					entryID: entryID,
+					subject: subject,
+					time:    mailTime,
+				})
+			} else {
+				a.logger.Warn("Failed to get mail time in snapshot", zap.String("subject", subject), zap.Error(errTime))
+			}
+		} else {
+			a.logger.Warn("Failed to get EntryID in snapshot", zap.Error(errID))
+		}
+		
+		nextItem, _ := a.bridge.GetNext(restricted)
+		comutil.SafeRelease(item)
+		item = nextItem
+	}
+	if item != nil {
+		comutil.SafeRelease(item)
+	}
+
+	for i := len(metas) - 1; i >= 0; i-- {
+		meta := metas[i]
+		if ctx.Err() != nil {
+			res.TotalSkipped += (i + 1)
 			break
 		}
 		if opts.MaxBatchSize > 0 && res.TotalMoved+moved >= opts.MaxBatchSize {
-			res.TotalSkipped += i
+			res.TotalSkipped += (i + 1)
 			break
 		}
 
-		itemVar, err := comutil.SafeCallMethod(restricted, "Item", i)
-		if err != nil {
-			a.logger.Warn("Failed to get item", zap.Int("index", i), zap.Error(err))
+		mailItem, err := a.bridge.GetItemFromID(meta.entryID)
+		if err != nil || mailItem == nil {
+			a.logger.Warn("Failed to get item by EntryID", zap.String("subject", meta.subject), zap.Error(err))
 			failed++
 			continue
 		}
-		item := itemVar.ToIDispatch()
-		if item == nil {
-			a.logger.Warn("Item is nil", zap.Int("index", i))
-			failed++
-			continue
-		}
-		itemRef := comutil.NewCOMRef(item, fmt.Sprintf("mail_%d", i))
+		itemRef := comutil.NewCOMRef(mailItem, "mail_"+meta.entryID)
 
-		// Read properties
-		subject := a.bridge.GetSubject(itemRef.Dispatch())
-		mailTime, err := a.bridge.GetMailTime(itemRef.Dispatch(), folder.TimeField)
-		if err != nil {
-			a.logger.Warn("Failed to get mail time", zap.String("subject", subject), zap.Error(err))
-			itemRef.Release()
-			failed++
-			continue
-		}
-
-		quarter := router.CalcQuarter(mailTime)
+		quarter := router.CalcQuarter(meta.time)
 
 		if opts.DryRun {
 			a.logger.Info("[DRY RUN] Would move mail",
-				zap.String("subject", subject),
-				zap.Time("mail_time", mailTime),
+				zap.String("subject", meta.subject),
+				zap.Time("mail_time", meta.time),
 				zap.String("source_folder", folder.FullPath),
 				zap.String("target_pst", quarter.PSTFileName()),
 			)
@@ -223,7 +245,7 @@ func (a *Archiver) processFolder(ctx context.Context, folder outlook.FolderInfo,
 		pstRoot, err := a.bridge.EnsurePSTMounted(quarter, a.cfg.PSTRootPath)
 		if err != nil {
 			a.logger.Error("Failed to ensure PST mounted", zap.Error(err))
-			res.Errors = append(res.Errors, MailError{Subject: subject, Err: err})
+			res.Errors = append(res.Errors, MailError{Subject: meta.subject, Err: err})
 			itemRef.Release()
 			failed++
 			continue
@@ -232,7 +254,7 @@ func (a *Archiver) processFolder(ctx context.Context, folder outlook.FolderInfo,
 		targetFolder, err := a.bridge.EnsurePSTFolder(pstRoot, folder.FullPath)
 		if err != nil {
 			a.logger.Error("Failed to ensure PST folder", zap.Error(err))
-			res.Errors = append(res.Errors, MailError{Subject: subject, Err: err})
+			res.Errors = append(res.Errors, MailError{Subject: meta.subject, Err: err})
 			comutil.SafeRelease(pstRoot)
 			itemRef.Release()
 			failed++
@@ -241,8 +263,8 @@ func (a *Archiver) processFolder(ctx context.Context, folder outlook.FolderInfo,
 
 		err = a.bridge.MoveItem(itemRef.Dispatch(), targetFolder)
 		if err != nil {
-			a.logger.Error("Failed to move item", zap.String("subject", subject), zap.Error(err))
-			res.Errors = append(res.Errors, MailError{Subject: subject, Err: err})
+			a.logger.Error("Failed to move item", zap.String("subject", meta.subject), zap.Error(err))
+			res.Errors = append(res.Errors, MailError{Subject: meta.subject, Err: err})
 			failed++
 		} else {
 			moved++
