@@ -19,6 +19,32 @@ func (b *COMBridge) MoveItem(mailItem *ole.IDispatch, targetFolder *ole.IDispatc
 	})
 }
 
+// CopyItem 复制邮件到目标文件夹
+func (b *COMBridge) CopyItem(mailItem *ole.IDispatch, targetFolder *ole.IDispatch) error {
+	return b.Submit(func() error {
+		// Outlook 的 Copy 方法返回一个新邮件项 (IDispatch)
+		copiedVar, err := comutil.SafeCallMethod(mailItem, "Copy")
+		if err != nil {
+			return err
+		}
+		if copiedVar.Value() == nil {
+			return fmt.Errorf("Copy method returned nil")
+		}
+		defer copiedVar.Clear()
+		copiedItem := copiedVar.ToIDispatch()
+		if copiedItem != nil {
+			defer copiedItem.Release()
+			// 然后将复制出来的副本 Move 到目标文件夹
+			v, errMove := comutil.SafeCallMethod(copiedItem, "Move", targetFolder)
+			if v != nil {
+				v.Clear()
+			}
+			return errMove
+		}
+		return fmt.Errorf("Copy returned invalid IDispatch")
+	})
+}
+
 // GetSubject 获取邮件主题
 func (b *COMBridge) GetSubject(mailItem *ole.IDispatch) string {
 	var subject string

@@ -37,10 +37,15 @@ func InitLogger(cfg *config.Config) (*zap.Logger, error) {
 	encoderConfig := zap.NewProductionEncoderConfig()
 	encoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
 
+	fileLevel := zapcore.InfoLevel
+	if cfg != nil && cfg.DebugLog {
+		fileLevel = zapcore.DebugLevel
+	}
+
 	fileCore := zapcore.NewCore(
 		zapcore.NewJSONEncoder(encoderConfig),
 		zapcore.AddSync(w),
-		zapcore.InfoLevel,
+		fileLevel,
 	)
 
 	// 同时输出到控制台（方便开发调试）

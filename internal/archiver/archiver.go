@@ -32,6 +32,7 @@ type ArchiveOptions struct {
 	SafeDelay    time.Duration // 0 = 不延迟（全量整理模式）
 	MoveInterval time.Duration
 	DryRun       bool          // true = 仅日志，不执行 Move
+	CopyOnly     bool          // true = 仅复制，不执行 Move
 }
 
 type Archiver struct {
@@ -229,7 +230,11 @@ func (a *Archiver) processFolder(ctx context.Context, folder outlook.FolderInfo,
 		quarter := router.CalcQuarter(meta.time)
 
 		if opts.DryRun {
-			a.logger.Info("[DRY RUN] Would move mail",
+			action := "move"
+			if opts.CopyOnly {
+				action = "copy"
+			}
+			a.logger.Info("[DRY RUN] Would "+action+" mail",
 				zap.String("subject", meta.subject),
 				zap.Time("mail_time", meta.time),
 				zap.String("source_folder", folder.FullPath),
@@ -261,13 +266,26 @@ func (a *Archiver) processFolder(ctx context.Context, folder outlook.FolderInfo,
 			continue
 		}
 
-		err = a.bridge.MoveItem(itemRef.Dispatch(), targetFolder)
-		if err != nil {
-			a.logger.Error("Failed to move item", zap.String("subject", meta.subject), zap.Error(err))
-			res.Errors = append(res.Errors, MailError{Subject: meta.subject, Err: err})
-			failed++
+		if opts.CopyOnly {
+			err = a.bridge.CopyItem(itemRef.Dispatch(), targetFolder)
+			if err != nil {
+				a.logger.Error("Failed to copy item", zap.String("subject", meta.subject), zap.Error(err))
+				res.Errors = append(res.Errors, MailError{Subject: meta.subject, Err: err})
+				failed++
+			} else {
+				a.logger.Info("Copied mail", zap.String("subject", meta.subject), zap.String("target_pst", quarter.PSTFileName()))
+				moved++
+			}
 		} else {
-			moved++
+			err = a.bridge.MoveItem(itemRef.Dispatch(), targetFolder)
+			if err != nil {
+				a.logger.Error("Failed to move item", zap.String("subject", meta.subject), zap.Error(err))
+				res.Errors = append(res.Errors, MailError{Subject: meta.subject, Err: err})
+				failed++
+			} else {
+				a.logger.Info("Moved mail", zap.String("subject", meta.subject), zap.String("target_pst", quarter.PSTFileName()))
+				moved++
+			}
 		}
 
 		comutil.SafeRelease(targetFolder)

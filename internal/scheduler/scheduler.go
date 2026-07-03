@@ -134,6 +134,7 @@ func (s *Scheduler) TriggerOnce(ctx context.Context) error {
 		SafeDelay:    time.Duration(s.cfg.SafeDelayMin) * time.Minute,
 		MoveInterval: time.Duration(s.cfg.MoveIntervalMs) * time.Millisecond,
 		DryRun:       s.cfg.DryRun,
+		CopyOnly:     s.cfg.CopyOnly,
 	}
 
 	res, err := s.archiver.Archive(ctx, opts)

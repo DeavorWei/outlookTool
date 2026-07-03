@@ -62,6 +62,7 @@ func (r *Reorganizer) Reorganize(ctx context.Context, progressCb func(phase, pro
 		SafeDelay:    0, // 不延迟
 		MoveInterval: time.Duration(r.cfg.MoveIntervalMs) * time.Millisecond,
 		DryRun:       r.cfg.DryRun,
+		CopyOnly:     r.cfg.CopyOnly,
 	}
 	phase1Res, err := r.archiver.Archive(ctx, phase1Opts)
 	if err != nil {
@@ -345,9 +346,13 @@ func (r *Reorganizer) processPSTFolder(ctx context.Context, folder outlook.Folde
 			continue
 		}
 
-		err = r.bridge.MoveItem(itemRef.Dispatch(), targetFolder)
+		if r.cfg.CopyOnly {
+			err = r.bridge.CopyItem(itemRef.Dispatch(), targetFolder)
+		} else {
+			err = r.bridge.MoveItem(itemRef.Dispatch(), targetFolder)
+		}
 		if err != nil {
-			r.logger.Error("移动纠偏邮件失败", zap.String("subject", meta.subject), zap.Error(err))
+			r.logger.Error("移动/复制失败", zap.Error(err))
 			res.TotalFailed++
 		} else {
 			if forceMigrate {

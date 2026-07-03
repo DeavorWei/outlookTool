@@ -140,7 +140,7 @@ func onReady(sched *scheduler.Scheduler, cfg *config.Config) {
 				exeDir, err := os.Executable()
 				if err == nil {
 					configPath := filepath.Join(filepath.Dir(exeDir), "config.yaml")
-					exec.Command("notepad", configPath).Start()
+					exec.Command("cmd", "/c", "start", "", configPath).Start()
 				}
 			case <-mAutoStart.ClickedCh:
 				if mAutoStart.Checked() {

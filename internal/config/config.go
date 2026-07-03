@@ -20,6 +20,8 @@ type Config struct {
 	LogRetentionDays   int      `yaml:"log_retention_days"`
 	MoveIntervalMs     int      `yaml:"move_interval_ms"`
 	DryRun             bool     `yaml:"dry_run"` // true = 仅日志，不执行 Move
+	CopyOnly           bool     `yaml:"copy_only"` // true = 仅复制，不执行 Move
+	DebugLog           bool     `yaml:"debug_log"` // true = 将 Debug 级别日志输出到文件
 	LegacyPSTScanPaths []string `yaml:"legacy_pst_scan_paths"`
 }
 
@@ -41,6 +43,8 @@ func DefaultConfig() *Config {
 		LogRetentionDays:   7,
 		MoveIntervalMs:     50,
 		DryRun:             false,
+		CopyOnly:           false,
+		DebugLog:           false,
 		LegacyPSTScanPaths: []string{},
 	}
 }
