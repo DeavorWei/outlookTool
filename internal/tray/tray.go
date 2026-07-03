@@ -167,11 +167,17 @@ func onReady(sched *scheduler.Scheduler, cfg *config.Config, zlog *zap.Logger) {
 					err := registry.SetAutoStart(false)
 					if err == nil {
 						mAutoStart.Uncheck()
+						zlog.Info("已取消开机自启")
+					} else {
+						zlog.Error("取消开机自启失败", zap.Error(err))
 					}
 				} else {
 					err := registry.SetAutoStart(true)
 					if err == nil {
 						mAutoStart.Check()
+						zlog.Info("已开启开机自启")
+					} else {
+						zlog.Error("开启开机自启失败", zap.Error(err))
 					}
 				}
 			case <-mQuit.ClickedCh:
