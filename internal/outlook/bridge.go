@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"unsafe"
+	"sync/atomic"
 
 	"github.com/go-ole/go-ole"
 	"github.com/go-ole/go-ole/oleutil"
@@ -32,7 +33,7 @@ func (b *COMBridge) Run(ctx context.Context) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	
-	b.threadID = windows.GetCurrentThreadId()
+	atomic.StoreUint32(&b.threadID, windows.GetCurrentThreadId())
 
 	ole.CoInitializeEx(0, ole.COINIT_APARTMENTTHREADED)
 	defer ole.CoUninitialize()
@@ -49,7 +50,7 @@ func (b *COMBridge) Run(ctx context.Context) {
 
 // Submit 向 COM 线程提交操作并等待结果
 func (b *COMBridge) Submit(fn func() error) error {
-	if b.threadID != 0 && windows.GetCurrentThreadId() == b.threadID {
+	if tid := atomic.LoadUint32(&b.threadID); tid != 0 && windows.GetCurrentThreadId() == tid {
 		return fn()
 	}
 

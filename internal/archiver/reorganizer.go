@@ -49,11 +49,14 @@ func NewReorganizer(cfg *config.Config, bridge *outlook.COMBridge, archiver *Arc
 }
 
 // Reorganize 执行全量整理
-func (r *Reorganizer) Reorganize(ctx context.Context) (*ReorganizeResult, error) {
+func (r *Reorganizer) Reorganize(ctx context.Context, progressCb func(phase, processed, rectified int, currentPST string)) (*ReorganizeResult, error) {
 	result := &ReorganizeResult{}
 
 	// 阶段一：邮箱全量归档
 	r.logger.Info("开始全量整理 - 阶段一：邮箱归档")
+	if progressCb != nil {
+		progressCb(1, 0, 0, "")
+	}
 	phase1Opts := ArchiveOptions{
 		MaxBatchSize: 0, // 不限制批次
 		SafeDelay:    0, // 不延迟
@@ -89,7 +92,7 @@ func (r *Reorganizer) Reorganize(ctx context.Context) (*ReorganizeResult, error)
 		if ctx.Err() != nil {
 			return result, ctx.Err()
 		}
-		r.rectifyOurPST(ctx, pstPath, &result.Phase2)
+		r.rectifyOurPST(ctx, pstPath, &result.Phase2, progressCb)
 	}
 
 	// 处理第三方 PST 的全量迁移
@@ -97,7 +100,7 @@ func (r *Reorganizer) Reorganize(ctx context.Context) (*ReorganizeResult, error)
 		if ctx.Err() != nil {
 			return result, ctx.Err()
 		}
-		r.migrateLegacyPST(ctx, pstPath, &result.Phase2)
+		r.migrateLegacyPST(ctx, pstPath, &result.Phase2, progressCb)
 	}
 
 	result.Phase2.Duration = time.Since(startPhase2)
@@ -156,33 +159,35 @@ func DiscoverLegacyPSTs(scanPaths []string, ourRootPath string) ([]string, error
 			continue
 		}
 
-		entries, err := os.ReadDir(scanPath)
-		if err != nil {
-			continue
-		}
-
-		for _, entry := range entries {
-			if !entry.IsDir() && strings.HasSuffix(strings.ToLower(entry.Name()), ".pst") {
-				if !router.IsOurPSTName(entry.Name()) {
-					legacyPSTs = append(legacyPSTs, filepath.Join(scanPath, entry.Name()))
+		err = filepath.Walk(scanPath, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return nil // ignore errors
+			}
+			if !info.IsDir() && strings.HasSuffix(strings.ToLower(info.Name()), ".pst") {
+				if !router.IsOurPSTName(info.Name()) {
+					legacyPSTs = append(legacyPSTs, path)
 				}
 			}
+			return nil
+		})
+		if err != nil {
+			continue
 		}
 	}
 	return legacyPSTs, nil
 }
 
-func (r *Reorganizer) rectifyOurPST(ctx context.Context, pstPath string, res *RectifyResult) {
+func (r *Reorganizer) rectifyOurPST(ctx context.Context, pstPath string, res *RectifyResult, progressCb func(phase, processed, rectified int, currentPST string)) {
 	r.logger.Info("正在纠偏 PST", zap.String("path", pstPath))
-	r.processPST(ctx, pstPath, res, false)
+	r.processPST(ctx, pstPath, res, false, progressCb)
 }
 
-func (r *Reorganizer) migrateLegacyPST(ctx context.Context, pstPath string, res *RectifyResult) {
+func (r *Reorganizer) migrateLegacyPST(ctx context.Context, pstPath string, res *RectifyResult, progressCb func(phase, processed, rectified int, currentPST string)) {
 	r.logger.Info("正在迁移第三方 PST", zap.String("path", pstPath))
-	r.processPST(ctx, pstPath, res, true)
+	r.processPST(ctx, pstPath, res, true, progressCb)
 }
 
-func (r *Reorganizer) processPST(ctx context.Context, pstPath string, res *RectifyResult, forceMigrate bool) {
+func (r *Reorganizer) processPST(ctx context.Context, pstPath string, res *RectifyResult, forceMigrate bool, progressCb func(phase, processed, rectified int, currentPST string)) {
 	// 挂载 PST
 	pstRoot, err := r.bridge.EnsurePSTMountedByPath(pstPath)
 	if err != nil {
@@ -204,11 +209,11 @@ func (r *Reorganizer) processPST(ctx context.Context, pstPath string, res *Recti
 		if ctx.Err() != nil {
 			return
 		}
-		r.processPSTFolder(ctx, folder, currentPSTName, res, forceMigrate)
+		r.processPSTFolder(ctx, folder, currentPSTName, res, forceMigrate, progressCb)
 	}
 }
 
-func (r *Reorganizer) processPSTFolder(ctx context.Context, folder outlook.FolderInfo, currentPSTName string, res *RectifyResult, forceMigrate bool) {
+func (r *Reorganizer) processPSTFolder(ctx context.Context, folder outlook.FolderInfo, currentPSTName string, res *RectifyResult, forceMigrate bool, progressCb func(phase, processed, rectified int, currentPST string)) {
 	itemsVar, err := comutil.SafeGetProperty(folder.Dispatch, "Items")
 	if err != nil {
 		return
@@ -292,6 +297,9 @@ func (r *Reorganizer) processPSTFolder(ctx context.Context, folder outlook.Folde
 
 		if !needsMove {
 			itemRef.Release()
+			if progressCb != nil && i%50 == 0 {
+				progressCb(2, 0, res.TotalRectified+res.TotalMigrated, currentPSTName)
+			}
 			continue
 		}
 
@@ -307,6 +315,9 @@ func (r *Reorganizer) processPSTFolder(ctx context.Context, folder outlook.Folde
 				res.TotalRectified++
 			}
 			itemRef.Release()
+			if progressCb != nil && i%10 == 0 {
+				progressCb(2, 0, res.TotalRectified+res.TotalMigrated, currentPSTName)
+			}
 			time.Sleep(time.Duration(r.cfg.MoveIntervalMs) * time.Millisecond)
 			continue
 		}
@@ -344,6 +355,10 @@ func (r *Reorganizer) processPSTFolder(ctx context.Context, folder outlook.Folde
 		comutil.SafeRelease(targetFolder)
 		comutil.SafeRelease(targetPSTRoot)
 		itemRef.Release()
+
+		if progressCb != nil {
+			progressCb(2, 0, res.TotalRectified+res.TotalMigrated, currentPSTName)
+		}
 
 		time.Sleep(time.Duration(r.cfg.MoveIntervalMs) * time.Millisecond)
 	}

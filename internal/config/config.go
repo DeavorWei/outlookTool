@@ -25,14 +25,14 @@ type Config struct {
 func DefaultConfig() *Config {
 	return &Config{
 		PSTRootPath:        "",
-		PollIntervalMin:    60,
-		SafeDelayMin:       30,
-		MaxBatchSize:       100,
-		ArchiveMode:        "list",
+		PollIntervalMin:    10,
+		SafeDelayMin:       10,
+		MaxBatchSize:       500,
+		ArchiveMode:        "all",
 		ExcludeFolders:     []string{},
 		IncludeFolders:     []string{},
-		LogRetentionDays:   30,
-		MoveIntervalMs:     500,
+		LogRetentionDays:   7,
+		MoveIntervalMs:     50,
 		DryRun:             false,
 		LegacyPSTScanPaths: []string{},
 	}
@@ -49,6 +49,9 @@ func LoadConfig(path string) (*Config, error) {
 			err = SaveConfig(path, config)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to save default config to %s: %v. Using in-memory default.\n", path, err)
+			}
+			if err := ValidateConfig(config); err != nil {
+				return nil, fmt.Errorf("invalid default configuration: %w", err)
 			}
 			return config, nil
 		}

@@ -12,6 +12,7 @@ import (
 
 	"outlook-archiver/internal/config"
 	"outlook-archiver/internal/logger"
+	"outlook-archiver/internal/monitor"
 	"outlook-archiver/internal/registry"
 	"outlook-archiver/internal/scheduler"
 )
@@ -26,7 +27,11 @@ var normalIcon = []byte{
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 }
 
-var workingIcon = normalIcon // 在完整版本中可使用不同的“旋转图标”代替
+var (
+	workingIcon = normalIcon // 在完整版本中可使用不同的“旋转图标”代替
+	warningIcon = normalIcon
+	errorIcon   = normalIcon
+)
 
 var (
 	trayCtx    context.Context
@@ -74,14 +79,29 @@ func onReady(sched *scheduler.Scheduler, cfg *config.Config) {
 					continue
 				}
 				state := sched.GetState()
+				diskStatus, _ := monitor.CheckDiskSpace(cfg.PSTRootPath)
 				switch state {
 				case scheduler.StateIdle, scheduler.StatePaused:
-					systray.SetIcon(normalIcon)
-					systray.SetTooltip("Outlook Auto-Archiver - 运行中")
+					if diskStatus == monitor.DiskCritical {
+						systray.SetIcon(errorIcon)
+						systray.SetTooltip("Outlook Auto-Archiver - 磁盘空间不足")
+					} else if diskStatus == monitor.DiskWarning {
+						systray.SetIcon(warningIcon)
+						systray.SetTooltip("Outlook Auto-Archiver - 磁盘空间警告")
+					} else {
+						systray.SetIcon(normalIcon)
+						systray.SetTooltip("Outlook Auto-Archiver - 运行中")
+					}
 					mArchiveOnce.Enable()
 					mReorganize.Enable()
 				case scheduler.StateArchiving:
-					systray.SetIcon(normalIcon)
+					if diskStatus == monitor.DiskCritical {
+						systray.SetIcon(errorIcon)
+					} else if diskStatus == monitor.DiskWarning {
+						systray.SetIcon(warningIcon)
+					} else {
+						systray.SetIcon(normalIcon)
+					}
 					systray.SetTooltip("归档中...")
 					mArchiveOnce.Disable()
 					mReorganize.Enable()
@@ -108,8 +128,8 @@ func onReady(sched *scheduler.Scheduler, cfg *config.Config) {
 			case <-mReorganize.ClickedCh:
 				if sched != nil {
 					// 触发全量整理，并传入进度更新回调
-					_ = sched.TriggerReorganize(context.Background(), func(info scheduler.ProgressInfo) {
-						systray.SetTooltip(fmt.Sprintf("全量整理中... 阶段%d - 已处理 %d 封", info.Phase, info.Processed))
+					_ = sched.TriggerReorganize(trayCtx, func(info scheduler.ProgressInfo) {
+						systray.SetTooltip(fmt.Sprintf("全量整理中... 阶段%d - 已纠偏 %d 封", info.Phase, info.Processed))
 					})
 				}
 			case <-mOpenLog.ClickedCh:
@@ -135,6 +155,10 @@ func onReady(sched *scheduler.Scheduler, cfg *config.Config) {
 					}
 				}
 			case <-mQuit.ClickedCh:
+				if sched != nil && sched.GetState() == scheduler.StateReorganizing {
+					fmt.Println("全量整理中，禁止退出")
+					continue
+				}
 				systray.Quit()
 			}
 		}

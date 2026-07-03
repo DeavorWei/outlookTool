@@ -33,22 +33,34 @@ func (b *COMBridge) WalkMailboxFolders(cfg *config.Config) ([]FolderInfo, error)
 		}
 		defer comutil.SafeRelease(ns)
 
+		var sentItemsID string
+		sentFolderVar, err := comutil.SafeCallMethod(ns, "GetDefaultFolder", 5) // olFolderSentMail
+		if err == nil && sentFolderVar.Value() != nil {
+			sentFolder := sentFolderVar.ToIDispatch()
+			idVar, err := comutil.SafeGetProperty(sentFolder, "EntryID")
+			if err == nil && idVar.Value() != nil {
+				sentItemsID = idVar.ToString()
+				idVar.Clear()
+			}
+			sentFolderVar.Clear()
+		}
+
 		// 获取默认邮箱的 Inbox
 		inboxVar, err := comutil.SafeCallMethod(ns, "GetDefaultFolder", 6) // olFolderInbox = 6
 		if err != nil {
 			return err
 		}
+		defer inboxVar.Clear()
 		inbox := inboxVar.ToIDispatch()
-		defer comutil.SafeRelease(inbox)
 
 		parentVar, err := comutil.SafeGetProperty(inbox, "Parent")
 		if err != nil {
 			return err
 		}
+		defer parentVar.Clear()
 		rootFolder := parentVar.ToIDispatch()
-		defer comutil.SafeRelease(rootFolder)
 
-		return b.walkFoldersRecursive(rootFolder, "", cfg, &results, true)
+		return b.walkFoldersRecursive(rootFolder, "", cfg, &results, true, sentItemsID)
 	})
 	return results, err
 }
@@ -58,24 +70,25 @@ func (b *COMBridge) WalkPSTFolders(pstRoot *ole.IDispatch) ([]FolderInfo, error)
 	var results []FolderInfo
 	// PST 遍历时不应用配置文件中的 include/exclude，全量遍历
 	err := b.Submit(func() error {
-		return b.walkFoldersRecursive(pstRoot, "", nil, &results, false)
+		return b.walkFoldersRecursive(pstRoot, "", nil, &results, false, "")
 	})
 	return results, err
 }
 
-func (b *COMBridge) walkFoldersRecursive(currentFolder *ole.IDispatch, currentPath string, cfg *config.Config, results *[]FolderInfo, checkSystem bool) error {
+func (b *COMBridge) walkFoldersRecursive(currentFolder *ole.IDispatch, currentPath string, cfg *config.Config, results *[]FolderInfo, checkSystem bool, sentItemsID string) error {
 	foldersVar, err := comutil.SafeGetProperty(currentFolder, "Folders")
 	if err != nil {
 		return nil
 	}
+	defer foldersVar.Clear()
 	folders := foldersVar.ToIDispatch()
-	defer comutil.SafeRelease(folders)
 
 	countVar, err := comutil.SafeGetProperty(folders, "Count")
 	if err != nil {
 		return nil
 	}
 	count := int(countVar.Val)
+	countVar.Clear()
 
 	for i := 1; i <= count; i++ {
 		folderVar, err := comutil.SafeCallMethod(folders, "Item", i)
@@ -83,6 +96,8 @@ func (b *COMBridge) walkFoldersRecursive(currentFolder *ole.IDispatch, currentPa
 			continue
 		}
 		folder := folderVar.ToIDispatch()
+		folder.AddRef()
+		folderVar.Clear()
 		
 		nameVar, err := comutil.SafeGetProperty(folder, "Name")
 		if err != nil {
@@ -116,7 +131,7 @@ func (b *COMBridge) walkFoldersRecursive(currentFolder *ole.IDispatch, currentPa
 						Name:       name,
 						FullPath:   fullPath,
 						FolderType: FolderTypeCustom,
-						TimeField:  getTimeField(folder, name),
+						TimeField:  getTimeField(folder, name, sentItemsID),
 						Dispatch:   folder,
 					})
 				} else if isPathPrefixOfIncluded(fullPath, cfg) {
@@ -131,7 +146,7 @@ func (b *COMBridge) walkFoldersRecursive(currentFolder *ole.IDispatch, currentPa
 					Name:       name,
 					FullPath:   fullPath,
 					FolderType: FolderTypeCustom,
-					TimeField:  getTimeField(folder, name),
+					TimeField:  getTimeField(folder, name, sentItemsID),
 					Dispatch:   folder,
 				})
 			}
@@ -141,12 +156,12 @@ func (b *COMBridge) walkFoldersRecursive(currentFolder *ole.IDispatch, currentPa
 				Name:       name,
 				FullPath:   fullPath,
 				FolderType: FolderTypeCustom,
-				TimeField:  getTimeField(folder, name),
+				TimeField:  getTimeField(folder, name, sentItemsID),
 				Dispatch:   folder,
 			})
 		}
 
-		_ = b.walkFoldersRecursive(folder, fullPath, cfg, results, checkSystem)
+		_ = b.walkFoldersRecursive(folder, fullPath, cfg, results, checkSystem, sentItemsID)
 		comutil.SafeRelease(folder)
 	}
 
@@ -160,8 +175,12 @@ func (b *COMBridge) isSystemReserved(folder *ole.IDispatch, name, fullPath strin
 	
 	// DefaultItemType: 0 = MailItem. 排除非邮件文件夹
 	itemTypeVar, err := comutil.SafeGetProperty(folder, "DefaultItemType")
-	if err == nil && int(itemTypeVar.Val) != 0 {
-		return true
+	if err == nil {
+		isMail := int(itemTypeVar.Val) == 0
+		itemTypeVar.Clear()
+		if !isMail {
+			return true
+		}
 	}
 	
 	lowerName := strings.ToLower(name)
@@ -209,10 +228,21 @@ func isPathPrefixOfIncluded(path string, cfg *config.Config) bool {
 	return false
 }
 
-func getTimeField(folder *ole.IDispatch, name string) string {
-	lowerName := strings.ToLower(name)
-	if lowerName == "已发送邮件" || lowerName == "sent items" {
-		return "SentOn"
+func getTimeField(folder *ole.IDispatch, name string, sentItemsID string) string {
+	if sentItemsID != "" {
+		idVar, err := comutil.SafeGetProperty(folder, "EntryID")
+		if err == nil && idVar.Value() != nil {
+			folderID := idVar.ToString()
+			idVar.Clear()
+			if folderID == sentItemsID {
+				return "SentOn"
+			}
+		}
+	} else {
+		lowerName := strings.ToLower(name)
+		if lowerName == "已发送邮件" || lowerName == "sent items" {
+			return "SentOn"
+		}
 	}
 	return "ReceivedTime"
 }

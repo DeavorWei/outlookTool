@@ -21,15 +21,15 @@ func TryLock() (release func(), err error) {
 		return nil, err
 	}
 
-	handle, err := windows.CreateMutex(nil, true, namePtr)
-	if err != nil {
-		if err == windows.ERROR_ALREADY_EXISTS {
-			if handle != 0 {
-				windows.CloseHandle(handle)
-			}
-			return nil, fmt.Errorf("程序已在运行中 (already running)")
-		}
+	handle, err := windows.CreateMutex(nil, false, namePtr)
+	if err != nil && err != windows.ERROR_ALREADY_EXISTS {
 		return nil, fmt.Errorf("failed to create mutex: %w", err)
+	}
+	if err == windows.ERROR_ALREADY_EXISTS || windows.GetLastError() == windows.ERROR_ALREADY_EXISTS {
+		if handle != 0 {
+			windows.CloseHandle(handle)
+		}
+		return nil, fmt.Errorf("程序已在运行中 (already running)")
 	}
 
 	release = func() {

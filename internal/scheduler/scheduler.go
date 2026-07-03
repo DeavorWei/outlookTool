@@ -177,7 +177,30 @@ func (s *Scheduler) TriggerReorganize(ctx context.Context, progressCb func(Progr
 
 	s.logger.Info("开始全量整理任务")
 
-	res, err := s.reorg.Reorganize(ctx)
+	// 检查磁盘空间
+	status, err := monitor.CheckDiskSpace(s.cfg.PSTRootPath)
+	if err != nil {
+		s.logger.Error("检查磁盘空间失败", zap.Error(err))
+		return err
+	}
+	if status == monitor.DiskCritical {
+		err := fmt.Errorf("磁盘空间极度不足")
+		s.logger.Error(err.Error())
+		return err
+	} else if status == monitor.DiskWarning {
+		s.logger.Warn("磁盘空间不足 1GB")
+	}
+
+	res, err := s.reorg.Reorganize(ctx, func(phase, processed, rectified int, currentPST string) {
+		if progressCb != nil {
+			progressCb(ProgressInfo{
+				Phase:      phase,
+				Processed:  processed,
+				Rectified:  rectified,
+				CurrentPST: currentPST,
+			})
+		}
+	})
 	if err != nil {
 		s.logger.Error("全量整理失败", zap.Error(err))
 		return err

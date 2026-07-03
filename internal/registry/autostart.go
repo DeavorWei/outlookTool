@@ -57,7 +57,7 @@ func IsAutoStartEnabled() bool {
 		return val != ""
 	}
 
-	cleanPath := `"` + filepath.Clean(exePath) + `"`
+	cleanPath := filepath.Clean(exePath)
 	// 忽略大小写比较路径
-	return strings.EqualFold(val, cleanPath)
+	return strings.EqualFold(strings.Trim(val, "\"`"), cleanPath)
 }

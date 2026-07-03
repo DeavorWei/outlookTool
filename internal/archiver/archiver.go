@@ -78,7 +78,7 @@ func (a *Archiver) Archive(ctx context.Context, opts ArchiveOptions) (*ArchiveRe
 		return nil, err
 	}
 
-	for _, folder := range folders {
+	for idx, folder := range folders {
 		if ctx.Err() != nil {
 			return res, ctx.Err()
 		}
@@ -89,6 +89,11 @@ func (a *Archiver) Archive(ctx context.Context, opts ArchiveOptions) (*ArchiveRe
 
 		if opts.MaxBatchSize > 0 && res.TotalMoved >= opts.MaxBatchSize {
 			a.logger.Info("Reached max batch size, stopping archive")
+			for j := idx + 1; j < len(folders); j++ {
+				count := a.countMatchedItems(folders[j], opts)
+				res.TotalMatched += count
+				res.TotalSkipped += count
+			}
 			break
 		}
 	}
@@ -113,8 +118,13 @@ func (a *Archiver) processFolder(ctx context.Context, folder outlook.FolderInfo,
 	}
 	defer comutil.SafeRelease(items)
 
-	cutoffTime := calcCutoffTime(opts.SafeDelay)
-	filter := BuildRestrictFilter(folder.TimeField, cutoffTime)
+	var filter string
+	if opts.SafeDelay == 0 {
+		filter = "[MessageClass] = 'IPM.Note'"
+	} else {
+		cutoffTime := calcCutoffTime(opts.SafeDelay)
+		filter = BuildRestrictFilter(folder.TimeField, cutoffTime)
+	}
 
 	a.logger.Debug("Restrict filter", zap.String("folder", folder.FullPath), zap.String("filter", filter))
 
@@ -238,4 +248,55 @@ func (a *Archiver) processFolder(ctx context.Context, folder outlook.FolderInfo,
 	}
 
 	return moved, failed
+}
+
+func (a *Archiver) countMatchedItems(folder outlook.FolderInfo, opts ArchiveOptions) int {
+	itemsVar, err := comutil.SafeGetProperty(folder.Dispatch, "Items")
+	if err != nil {
+		return 0
+	}
+	items := itemsVar.ToIDispatch()
+	if items == nil {
+		return 0
+	}
+	defer comutil.SafeRelease(items)
+
+	var filter string
+	if opts.SafeDelay == 0 {
+		filter = "[MessageClass] = 'IPM.Note'"
+	} else {
+		cutoffTime := calcCutoffTime(opts.SafeDelay)
+		filter = BuildRestrictFilter(folder.TimeField, cutoffTime)
+	}
+
+	restrictedVar, err := comutil.SafeCallMethod(items, "Restrict", filter)
+	if err != nil {
+		return 0
+	}
+	restricted := restrictedVar.ToIDispatch()
+	if restricted == nil {
+		return 0
+	}
+	defer comutil.SafeRelease(restricted)
+
+	countVar, err := comutil.SafeGetProperty(restricted, "Count")
+	if err != nil {
+		return 0
+	}
+	count := 0
+	if countVar.Value() != nil {
+		switch v := countVar.Value().(type) {
+		case int32:
+			count = int(v)
+		case int:
+			count = v
+		case int16:
+			count = int(v)
+		case float64:
+			count = int(v)
+		case int64:
+			count = int(v)
+		}
+	}
+	return count
 }

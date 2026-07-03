@@ -37,7 +37,7 @@ func (q QuarterInfo) DisplayName() string {
 	return fmt.Sprintf("%d_Q%d", q.Year, q.Quarter)
 }
 
-var pstNameRegex = regexp.MustCompile(`^\d{4}_Q[1-4]\.pst$`)
+var pstNameRegex = regexp.MustCompile(`(?i)^\d{4}_Q[1-4]\.pst$`)
 
 // IsOurPSTName 判断文件名是否符合本工具命名规范
 // 用于全量整理时区分本工具 PST 和第三方 PST

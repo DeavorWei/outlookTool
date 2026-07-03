@@ -80,11 +80,11 @@ func (b *COMBridge) EnsurePSTMountedByPath(expectedPath string) (*ole.IDispatch,
 				pathVar.Clear()
 				if strings.EqualFold(path, expectedPath) {
 					targetStore = store
-					storeVar.Clear() // keep store but clear variant? Wait, if we clear variant it releases store!
+					targetStore.AddRef()
+					storeVar.Clear()
 					break // Found it
 				}
 			}
-			comutil.SafeRelease(store)
 			storeVar.Clear()
 		}
 
@@ -113,10 +113,11 @@ func (b *COMBridge) EnsurePSTMountedByPath(expectedPath string) (*ole.IDispatch,
 					pathVar.Clear()
 					if isMatch {
 						targetStore = store
+						targetStore.AddRef()
+						storeVar.Clear()
 						break
 					}
 				}
-				comutil.SafeRelease(store)
 				storeVar.Clear()
 			}
 		}
@@ -162,25 +163,28 @@ func (b *COMBridge) EnsurePSTFolder(pstRoot *ole.IDispatch, folderPath string) (
 				return fmt.Errorf("failed to get Folders: %w", err)
 			}
 			folders := foldersVar.ToIDispatch()
-			defer foldersVar.Clear()
 			
 			var nextFolder *ole.IDispatch
 			// 尝试通过名称获取
 			folderVar, err := comutil.SafeCallMethod(folders, "Item", part)
 			if err == nil && folderVar.Value() != nil {
 				nextFolder = folderVar.ToIDispatch()
+				nextFolder.AddRef()
+				folderVar.Clear()
 			} else {
 				// 不存在则创建
 				newFolderVar, err := comutil.SafeCallMethod(folders, "Add", part)
 				if err != nil {
-					comutil.SafeRelease(folders)
+					foldersVar.Clear()
 					comutil.SafeRelease(currentFolder)
 					return fmt.Errorf("failed to create folder %s: %w", part, err)
 				}
 				nextFolder = newFolderVar.ToIDispatch()
+				nextFolder.AddRef()
+				newFolderVar.Clear()
 			}
 			
-			comutil.SafeRelease(folders)
+			foldersVar.Clear()
 			comutil.SafeRelease(currentFolder)
 			currentFolder = nextFolder
 		}
@@ -226,12 +230,12 @@ func (b *COMBridge) IsStoreMounted(filePath string) (bool, error) {
 				path := pathVar.ToString()
 				pathVar.Clear()
 				if strings.EqualFold(path, filePath) {
-					comutil.SafeRelease(store)
+					storeVar.Clear()
 					mounted = true
 					return nil
 				}
 			}
-			comutil.SafeRelease(store)
+			storeVar.Clear()
 		}
 		return nil
 	})
