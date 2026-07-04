@@ -3,6 +3,7 @@ package archiver
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -40,6 +41,9 @@ type Archiver struct {
 	cfg    *config.Config
 	bridge *outlook.COMBridge
 	logger *zap.Logger
+
+	pendingMu      sync.Mutex
+	pendingDeletes []string // 待删除的 PST 文件路径
 }
 
 func NewArchiver(cfg *config.Config, bridge *outlook.COMBridge, logger *zap.Logger) *Archiver {
@@ -47,6 +51,33 @@ func NewArchiver(cfg *config.Config, bridge *outlook.COMBridge, logger *zap.Logg
 		cfg:    cfg,
 		bridge: bridge,
 		logger: logger,
+	}
+}
+
+// AddPendingDelete 将 PST 文件路径加入待删除列表
+func (a *Archiver) AddPendingDelete(path string) {
+	a.pendingMu.Lock()
+	defer a.pendingMu.Unlock()
+	a.pendingDeletes = append(a.pendingDeletes, path)
+	a.logger.Info("已加入待删除列表", zap.String("pst", path))
+}
+
+// ProcessPendingDeletions 处理所有待删除的 PST 文件，使用退避重试策略
+func (a *Archiver) ProcessPendingDeletions() {
+	a.pendingMu.Lock()
+	if len(a.pendingDeletes) == 0 {
+		a.pendingMu.Unlock()
+		return
+	}
+	// 取出列表并清空，释放锁后再执行删除
+	paths := make([]string, len(a.pendingDeletes))
+	copy(paths, a.pendingDeletes)
+	a.pendingDeletes = nil
+	a.pendingMu.Unlock()
+
+	a.logger.Info("开始处理待删除 PST 文件", zap.Int("count", len(paths)))
+	for _, p := range paths {
+		a.deleteFileWithRetry(p)
 	}
 }
 

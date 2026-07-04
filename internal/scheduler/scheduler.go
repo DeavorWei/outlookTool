@@ -190,6 +190,10 @@ func (s *Scheduler) TriggerOnce(ctx context.Context) error {
 	}
 
 	s.logger.Info("常规归档任务完成", zap.Any("result", res))
+
+	// 归档任务完成后，处理待删除的 PST 文件
+	s.archiver.ProcessPendingDeletions()
+
 	return nil
 }
 

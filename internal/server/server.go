@@ -63,7 +63,7 @@ func (ws *WebServer) Start() (int, error) {
 	mux.HandleFunc("/api/config", ws.handleConfig)
 	mux.HandleFunc("/api/heartbeat", ws.handleHeartbeat)
 	mux.HandleFunc("/api/mounted-psts", ws.handleMountedPSTs)
-	mux.HandleFunc("/api/restore", ws.handleRestore)
+	mux.HandleFunc("/api/actions/restore", ws.handleRestore)
 	
 	mux.HandleFunc("/api/logs/stream", ws.handleLogStream)
 	mux.HandleFunc("/api/actions/trigger", ws.handleActionTrigger)

@@ -284,7 +284,6 @@ func (b *COMBridge) GetMountedPSTs() ([]string, error) {
 				pathVar.Clear()
 			}
 			storeVar.Clear()
-			comutil.SafeRelease(store)
 		}
 		return nil
 	})

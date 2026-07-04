@@ -56,11 +56,21 @@ func (a *Archiver) Restore(ctx context.Context, deleteEmptyPST, deleteDuplicates
 			continue
 		}
 		
-		err = a.restorePST(ctx, pstPath, pstRoot, ostRoot, deleteEmptyPST, deleteDuplicates, result)
+		isEmpty, err := a.restorePST(ctx, pstPath, pstRoot, ostRoot, deleteEmptyPST, deleteDuplicates, result)
 		
 		// 卸载
 		_ = a.bridge.RemoveStore(pstRoot)
 		comutil.SafeRelease(pstRoot)
+
+		if deleteEmptyPST && isEmpty {
+			a.logger.Info("PST 已清空，准备物理删除", zap.String("pst", pstPath))
+			if a.cfg.DryRun {
+				a.logger.Info("[Dry Run] 模拟删除空 PST 文件", zap.String("pst", pstPath))
+			} else {
+				// 加入待删除列表，由定时任务完成后统一处理
+				a.AddPendingDelete(pstPath)
+			}
+		}
 
 		if err != nil {
 			a.logger.Error("还原 PST 时出错", zap.String("pst", pstPath), zap.Error(err))
@@ -107,16 +117,16 @@ func (a *Archiver) collectPSTsToRestore() ([]string, error) {
 	return list, nil
 }
 
-func (a *Archiver) restorePST(ctx context.Context, pstPath string, pstRoot, ostRoot *ole.IDispatch, deleteEmpty, deleteDup bool, res *ArchiveResult) error {
+func (a *Archiver) restorePST(ctx context.Context, pstPath string, pstRoot, ostRoot *ole.IDispatch, deleteEmpty, deleteDup bool, res *ArchiveResult) (bool, error) {
 	folders, err := a.bridge.WalkPSTFolders(pstRoot)
 	if err != nil {
-		return err
+		return false, err
 	}
 	
 	for _, f := range folders {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return false, ctx.Err()
 		default:
 		}
 		
@@ -135,8 +145,8 @@ func (a *Archiver) restorePST(ctx context.Context, pstPath string, pstRoot, ostR
 		}
 	}
 	
+	isEmpty := true
 	if deleteEmpty {
-		isEmpty := true
 		for _, f := range folders {
 			count, err := a.bridge.GetFolderItemCount(f.Dispatch)
 			if err != nil || count > 0 {
@@ -144,26 +154,22 @@ func (a *Archiver) restorePST(ctx context.Context, pstPath string, pstRoot, ostR
 				break
 			}
 		}
-		
-		if isEmpty {
-			a.logger.Info("PST 已清空，准备物理删除", zap.String("pst", pstPath))
-			if a.cfg.DryRun {
-				a.logger.Info("[Dry Run] 模拟删除空 PST 文件", zap.String("pst", pstPath))
-			} else {
-				_ = a.bridge.RemoveStore(pstRoot) // 提前卸载，防止文件被占用
-				time.Sleep(1 * time.Second)       // 给 Outlook 释放文件一点时间
-				if err := os.Remove(pstPath); err != nil {
-					a.logger.Error("删除空 PST 失败", zap.String("pst", pstPath), zap.Error(err))
-				} else {
-					a.logger.Info("空 PST 删除成功", zap.String("pst", pstPath))
-				}
-			}
-		} else {
+	}
+
+	// 释放所有的文件夹引用，防止占用 PST 导致无法卸载或删除
+	for _, f := range folders {
+		if f.Dispatch != nil {
+			comutil.SafeRelease(f.Dispatch)
+		}
+	}
+
+	if deleteEmpty {
+		if !isEmpty {
 			a.logger.Info("PST 不为空，保留", zap.String("pst", pstPath))
 		}
 	}
 	
-	return nil
+	return isEmpty, nil
 }
 
 func (a *Archiver) restoreFolderItems(ctx context.Context, pstFolder outlook.FolderInfo, ostFolder *ole.IDispatch, deleteDup bool, res *ArchiveResult) error {
@@ -171,7 +177,7 @@ func (a *Archiver) restoreFolderItems(ctx context.Context, pstFolder outlook.Fol
 	// 收集 OST 现有的 key 用于去重
 	var ostSet map[string]bool
 	if deleteDup {
-		ostSet = a.buildDuplicateSet(ostFolder, pstFolder.TimeField)
+		ostSet = a.buildDuplicateSet(ctx, ostFolder, pstFolder.TimeField)
 	}
 
 	itemsVar, err := comutil.SafeGetProperty(pstFolder.Dispatch, "Items")
@@ -217,8 +223,9 @@ func (a *Archiver) restoreFolderItems(ctx context.Context, pstFolder outlook.Fol
 					res.TotalMoved++
 				} else {
 					if err := a.bridge.DeleteItem(item); err != nil {
-						a.logger.Warn("删除重复邮件失败", zap.Error(err))
+						a.logger.Warn("删除重复邮件失败", zap.Error(err), zap.String("subject", subj))
 					} else {
+						a.logger.Info("成功删除重复邮件", zap.String("subject", subj))
 						res.TotalMoved++ // 把处理掉的重复件也视为处理成功
 					}
 				}
@@ -231,15 +238,17 @@ func (a *Archiver) restoreFolderItems(ctx context.Context, pstFolder outlook.Fol
 		}
 		
 		// 移动邮件
+		subj := a.bridge.GetSubject(item)
 		if a.cfg.DryRun {
-			a.logger.Info("[Dry Run] 模拟移动邮件", zap.String("subject", a.bridge.GetSubject(item)))
+			a.logger.Info("[Dry Run] 模拟移动邮件", zap.String("subject", subj))
 			res.TotalMoved++
 		} else {
 			if err := a.bridge.MoveItem(item, ostFolder); err != nil {
-				a.logger.Warn("移动邮件失败", zap.Error(err))
+				a.logger.Warn("移动邮件失败", zap.Error(err), zap.String("subject", subj))
 				res.TotalFailed++
-				res.Errors = append(res.Errors, MailError{Subject: a.bridge.GetSubject(item), Err: err})
+				res.Errors = append(res.Errors, MailError{Subject: subj, Err: err})
 			} else {
+				a.logger.Info("成功移动邮件", zap.String("subject", subj))
 				res.TotalMoved++
 			}
 		}
@@ -254,7 +263,7 @@ func (a *Archiver) restoreFolderItems(ctx context.Context, pstFolder outlook.Fol
 	})
 }
 
-func (a *Archiver) buildDuplicateSet(folder *ole.IDispatch, timeField string) map[string]bool {
+func (a *Archiver) buildDuplicateSet(ctx context.Context, folder *ole.IDispatch, timeField string) map[string]bool {
 	set := make(map[string]bool)
 	itemsVar, err := comutil.SafeGetProperty(folder, "Items")
 	if err != nil || itemsVar.Value() == nil {
@@ -271,13 +280,17 @@ func (a *Archiver) buildDuplicateSet(folder *ole.IDispatch, timeField string) ma
 	count := int(countVar.Val)
 	countVar.Clear()
 	
-	// 取前 5000 封，避免 OST 太大时卡死
-	limit := count
-	if limit > 5000 {
-		limit = 5000
+	if count > 5000 {
+		a.logger.Info("目标文件夹较大，正在全量构建去重索引，这可能需要一点时间...", zap.Int("total", count))
 	}
-	
-	for i := 1; i <= limit; i++ {
+
+	for i := 1; i <= count; i++ {
+		select {
+		case <-ctx.Done():
+			return set
+		default:
+		}
+
 		itemVar, err := comutil.SafeCallMethod(items, "Item", i)
 		if err != nil || itemVar.Value() == nil {
 			continue
@@ -289,6 +302,64 @@ func (a *Archiver) buildDuplicateSet(folder *ole.IDispatch, timeField string) ma
 		set[key] = true
 		
 		itemVar.Clear()
+
+		if i%5000 == 0 {
+			a.logger.Info("去重索引构建进度", zap.Int("processed", i), zap.Int("total", count))
+		}
 	}
 	return set
+}
+
+// isFileLocked 检查文件是否被其他进程占用（尝试以读写模式独占打开）
+func isFileLocked(path string) bool {
+	f, err := os.OpenFile(path, os.O_RDWR, 0666)
+	if err != nil {
+		return true
+	}
+	f.Close()
+	return false
+}
+
+// deleteFileWithRetry 在独立协程中删除文件
+// 先等待 30 秒让 Outlook 释放句柄，之后每隔 30 秒重试一次，共尝试 3 次，总等待时间约 2 分钟
+func (a *Archiver) deleteFileWithRetry(path string) {
+	a.logger.Info("启动异步删除，等待 Outlook 释放文件句柄...", zap.String("pst", path))
+	time.Sleep(30 * time.Second)
+
+	const (
+		maxAttempts   = 3
+		retryInterval = 30 * time.Second
+	)
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		// 在删除前验证文件是否仍被占用
+		if isFileLocked(path) {
+			a.logger.Warn("文件仍被占用，等待后重试",
+				zap.String("pst", path),
+				zap.Int("attempt", attempt),
+				zap.Int("maxAttempts", maxAttempts),
+				zap.Duration("wait", retryInterval))
+			time.Sleep(retryInterval)
+			continue
+		}
+
+		// 文件未被占用，尝试删除
+		err := os.Remove(path)
+		if err == nil {
+			a.logger.Info("空 PST 删除成功", zap.String("pst", path))
+			return
+		}
+
+		// 删除失败（可能在检查与删除之间被重新锁定）
+		a.logger.Warn("删除文件失败，等待后重试",
+			zap.String("pst", path),
+			zap.Int("attempt", attempt),
+			zap.Error(err),
+			zap.Duration("wait", retryInterval))
+		time.Sleep(retryInterval)
+	}
+
+	a.logger.Error("删除空 PST 最终失败（已耗尽所有重试）",
+		zap.String("pst", path),
+		zap.Int("totalAttempts", maxAttempts))
 }
