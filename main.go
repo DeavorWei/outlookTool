@@ -32,7 +32,7 @@ func main() {
 		log.Fatalf("无法获取程序执行路径: %v", err)
 	}
 	configPath := filepath.Join(filepath.Dir(exePath), "config.yaml")
-	cfg, err := config.LoadConfig(configPath)
+	cfg, isFirstRun, err := config.LoadConfig(configPath)
 	if err != nil {
 		log.Fatalf("加载配置失败: %v", err)
 	}
@@ -63,7 +63,7 @@ func main() {
 	defer sched.Stop()
 
 	// 7. 初始化并运行系统托盘 (会阻塞主线程)
-	tray.InitTray(sched, cfg, zlog)
+	tray.InitTray(sched, cfg, zlog, isFirstRun)
 
 	zlog.Info("正在停止后台任务...")
 	cancel() // 取消 context，通知各组件停止

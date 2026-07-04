@@ -130,10 +130,43 @@ func (r *Reorganizer) discoverPSTs() (ourPSTs []string, legacyPSTs []string, err
 		r.logger.Warn("扫描 pst_root_path 失败", zap.Error(err))
 	}
 
-	// 扫描 legacy_pst_scan_paths
-	legacyPaths, err := DiscoverLegacyPSTs(r.cfg.LegacyPSTScanPaths, r.cfg.PSTRootPath)
+	// 构造要扫描的历史目录列表
+	scanPaths := make([]string, len(r.cfg.LegacyPSTScanPaths))
+	copy(scanPaths, r.cfg.LegacyPSTScanPaths)
+
+	if r.cfg.IncludeMountedPSTs {
+		mountedPSTs, err := r.bridge.GetMountedPSTs()
+		if err != nil {
+			r.logger.Warn("获取已挂载的数据文件失败", zap.Error(err))
+		} else {
+			dirMap := make(map[string]bool)
+			for _, pstPath := range mountedPSTs {
+				dir := filepath.Dir(pstPath)
+				// 排除 PSTRootPath
+				if !strings.EqualFold(dir, r.cfg.PSTRootPath) {
+					dirMap[dir] = true
+				}
+			}
+			for dir := range dirMap {
+				// 避免与现有的 scanPaths 重复
+				exists := false
+				for _, sp := range scanPaths {
+					if strings.EqualFold(sp, dir) {
+						exists = true
+						break
+					}
+				}
+				if !exists {
+					scanPaths = append(scanPaths, dir)
+				}
+			}
+		}
+	}
+
+	// 扫描 legacy_pst_scan_paths + mounted directories
+	legacyPaths, err := DiscoverLegacyPSTs(scanPaths, r.cfg.PSTRootPath)
 	if err != nil {
-		r.logger.Warn("扫描 legacy_pst_scan_paths 失败", zap.Error(err))
+		r.logger.Warn("扫描额外 PST 目录失败", zap.Error(err))
 	}
 	legacyPSTs = append(legacyPSTs, legacyPaths...)
 

@@ -16,6 +16,7 @@ import (
 	"go.uber.org/zap"
 	"outlook-archiver/internal/registry"
 	"outlook-archiver/internal/scheduler"
+	"outlook-archiver/internal/server"
 )
 
 // normalIcon 使用简单的 1x1 透明 ICO 字节数组模拟，后续可替换为真实的托盘图标。
@@ -40,14 +41,14 @@ var (
 )
 
 // InitTray 初始化并运行系统托盘
-func InitTray(sched *scheduler.Scheduler, cfg *config.Config, zlog *zap.Logger) {
+func InitTray(sched *scheduler.Scheduler, cfg *config.Config, zlog *zap.Logger, isFirstRun bool) {
 	trayCtx, trayCancel = context.WithCancel(context.Background())
 	systray.Run(func() {
-		onReady(sched, cfg, zlog)
+		onReady(sched, cfg, zlog, isFirstRun)
 	}, onExit)
 }
 
-func onReady(sched *scheduler.Scheduler, cfg *config.Config, zlog *zap.Logger) {
+func onReady(sched *scheduler.Scheduler, cfg *config.Config, zlog *zap.Logger, isFirstRun bool) {
 	systray.SetIcon(normalIcon)
 	systray.SetTooltip("Outlook Auto-Archiver - 运行中")
 
@@ -57,6 +58,22 @@ func onReady(sched *scheduler.Scheduler, cfg *config.Config, zlog *zap.Logger) {
 	mOpenLog := systray.AddMenuItem("打开日志目录", "")
 	mOpenConfig := systray.AddMenuItem("打开配置文件", "")
 	mReloadConfig := systray.AddMenuItem("重新加载配置", "修改配置文件后点击生效")
+	mWebConfig := systray.AddMenuItemCheckbox("Web 配置中心", "在本地浏览器中打开配置中心", false)
+
+	exeDir, _ := os.Executable()
+	configPath := filepath.Join(filepath.Dir(exeDir), "config.yaml")
+	ws := server.NewWebServer(zlog, sched, configPath, func() {
+		mWebConfig.Uncheck()
+	})
+
+	if isFirstRun {
+		port, err := ws.Start()
+		if err == nil {
+			mWebConfig.Check()
+			url := fmt.Sprintf("http://127.0.0.1:%d/?first_run=true", port)
+			exec.Command("cmd", "/c", "start", "", url).Start()
+		}
+	}
 
 	// 检查当前注册表状态
 	autoStartEnabled := false
@@ -80,6 +97,15 @@ func onReady(sched *scheduler.Scheduler, cfg *config.Config, zlog *zap.Logger) {
 				if sched == nil {
 					continue
 				}
+				
+				// Sync AutoStart state from registry
+				isAutoEnabled := registry.IsAutoStartEnabled()
+				if isAutoEnabled && !mAutoStart.Checked() {
+					mAutoStart.Check()
+				} else if !isAutoEnabled && mAutoStart.Checked() {
+					mAutoStart.Uncheck()
+				}
+
 				state := sched.GetState()
 				safeCfg := sched.GetConfigCopy()
 				diskStatus, _ := monitor.CheckDiskSpace(safeCfg.PSTRootPath)
@@ -160,6 +186,22 @@ func onReady(sched *scheduler.Scheduler, cfg *config.Config, zlog *zap.Logger) {
 						} else {
 							zlog.Info("重新加载配置成功")
 						}
+					}
+				}
+			case <-mWebConfig.ClickedCh:
+				if mWebConfig.Checked() {
+					// Stop the server
+					ws.Stop()
+					mWebConfig.Uncheck()
+				} else {
+					// Start the server
+					port, err := ws.Start()
+					if err != nil {
+						zlog.Error("启动 Web 服务失败", zap.Error(err))
+					} else {
+						mWebConfig.Check()
+						url := fmt.Sprintf("http://127.0.0.1:%d", port)
+						exec.Command("cmd", "/c", "start", "", url).Start()
 					}
 				}
 			case <-mAutoStart.ClickedCh:

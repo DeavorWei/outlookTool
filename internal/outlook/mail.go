@@ -19,6 +19,40 @@ func (b *COMBridge) MoveItem(mailItem *ole.IDispatch, targetFolder *ole.IDispatc
 	})
 }
 
+// DeleteItem 删除邮件
+func (b *COMBridge) DeleteItem(mailItem *ole.IDispatch) error {
+	return b.Submit(func() error {
+		v, err := comutil.SafeCallMethod(mailItem, "Delete")
+		if v != nil {
+			v.Clear()
+		}
+		return err
+	})
+}
+
+// GetFolderItemCount 获取文件夹中的邮件数量
+func (b *COMBridge) GetFolderItemCount(folder *ole.IDispatch) (int, error) {
+	var count int
+	err := b.Submit(func() error {
+		itemsVar, err := comutil.SafeGetProperty(folder, "Items")
+		if err != nil || itemsVar.Value() == nil {
+			return err
+		}
+		defer itemsVar.Clear()
+		items := itemsVar.ToIDispatch()
+		defer comutil.SafeRelease(items)
+
+		countVar, err := comutil.SafeGetProperty(items, "Count")
+		if err != nil || countVar.Value() == nil {
+			return err
+		}
+		defer countVar.Clear()
+		count = int(countVar.Val)
+		return nil
+	})
+	return count, err
+}
+
 // CopyItem 复制邮件到目标文件夹
 func (b *COMBridge) CopyItem(mailItem *ole.IDispatch, targetFolder *ole.IDispatch) error {
 	return b.Submit(func() error {

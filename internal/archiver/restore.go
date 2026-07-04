@@ -1,0 +1,294 @@
+package archiver
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/go-ole/go-ole"
+	"go.uber.org/zap"
+
+	"outlook-archiver/internal/outlook"
+	"outlook-archiver/pkg/comutil"
+)
+
+// Restore 提取挂载的 PST 及历史目录，将其中的邮件还原到默认 OST 主邮箱中。
+func (a *Archiver) Restore(ctx context.Context, deleteEmptyPST, deleteDuplicates bool) (*ArchiveResult, error) {
+	a.logger.Info("开始准备还原...", zap.Bool("deleteEmpty", deleteEmptyPST), zap.Bool("deleteDup", deleteDuplicates))
+	
+	// 1. 获取要处理的 PST 列表
+	pstPaths, err := a.collectPSTsToRestore()
+	if err != nil {
+		return nil, fmt.Errorf("收集 PST 失败: %w", err)
+	}
+	
+	if len(pstPaths) == 0 {
+		a.logger.Info("没有找到任何 PST 文件")
+		return &ArchiveResult{}, nil
+	}
+	
+	// 2. 获取 OST 根目录
+	ostRoot, err := a.bridge.GetDefaultMailboxRoot()
+	if err != nil {
+		return nil, fmt.Errorf("获取 OST 根目录失败: %w", err)
+	}
+	defer comutil.SafeRelease(ostRoot)
+
+	result := &ArchiveResult{}
+	
+	// 3. 逐个处理 PST
+	for _, pstPath := range pstPaths {
+		select {
+		case <-ctx.Done():
+			return result, ctx.Err()
+		default:
+		}
+		
+		a.logger.Info("开始处理 PST", zap.String("pst", pstPath))
+		
+		// 挂载 PST
+		pstRoot, err := a.bridge.EnsurePSTMountedByPath(pstPath)
+		if err != nil {
+			a.logger.Error("挂载 PST 失败", zap.String("pst", pstPath), zap.Error(err))
+			result.Errors = append(result.Errors, MailError{Subject: pstPath, Err: err})
+			continue
+		}
+		
+		err = a.restorePST(ctx, pstPath, pstRoot, ostRoot, deleteEmptyPST, deleteDuplicates, result)
+		
+		// 卸载
+		_ = a.bridge.RemoveStore(pstRoot)
+		comutil.SafeRelease(pstRoot)
+
+		if err != nil {
+			a.logger.Error("还原 PST 时出错", zap.String("pst", pstPath), zap.Error(err))
+		}
+	}
+	
+	return result, nil
+}
+
+// collectPSTsToRestore 收集当前挂载的 PST 以及遗留目录下的所有 PST
+func (a *Archiver) collectPSTsToRestore() ([]string, error) {
+	pathSet := make(map[string]bool)
+	
+	mounted, err := a.bridge.GetMountedPSTs()
+	if err != nil {
+		a.logger.Warn("获取挂载 PST 列表失败", zap.Error(err))
+	} else {
+		for _, p := range mounted {
+			pathSet[strings.ToLower(p)] = true
+		}
+	}
+	
+	for _, dir := range a.cfg.LegacyPSTScanPaths {
+		if dir == "" {
+			continue
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			a.logger.Warn("读取历史目录失败", zap.String("dir", dir), zap.Error(err))
+			continue
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() && strings.HasSuffix(strings.ToLower(entry.Name()), ".pst") {
+				fullPath := fmt.Sprintf("%s\\%s", dir, entry.Name())
+				pathSet[strings.ToLower(fullPath)] = true
+			}
+		}
+	}
+	
+	var list []string
+	for p := range pathSet {
+		list = append(list, p)
+	}
+	return list, nil
+}
+
+func (a *Archiver) restorePST(ctx context.Context, pstPath string, pstRoot, ostRoot *ole.IDispatch, deleteEmpty, deleteDup bool, res *ArchiveResult) error {
+	folders, err := a.bridge.WalkPSTFolders(pstRoot)
+	if err != nil {
+		return err
+	}
+	
+	for _, f := range folders {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		
+		a.logger.Info("处理 PST 文件夹", zap.String("folder", f.FullPath))
+		
+		ostFolder, err := a.bridge.EnsurePSTFolder(ostRoot, f.FullPath)
+		if err != nil {
+			a.logger.Error("在 OST 中创建目标文件夹失败", zap.String("folder", f.FullPath), zap.Error(err))
+			continue
+		}
+		
+		err = a.restoreFolderItems(ctx, f, ostFolder, deleteDup, res)
+		comutil.SafeRelease(ostFolder)
+		if err != nil {
+			a.logger.Error("处理文件夹邮件失败", zap.String("folder", f.FullPath), zap.Error(err))
+		}
+	}
+	
+	if deleteEmpty {
+		isEmpty := true
+		for _, f := range folders {
+			count, err := a.bridge.GetFolderItemCount(f.Dispatch)
+			if err != nil || count > 0 {
+				isEmpty = false
+				break
+			}
+		}
+		
+		if isEmpty {
+			a.logger.Info("PST 已清空，准备物理删除", zap.String("pst", pstPath))
+			if a.cfg.DryRun {
+				a.logger.Info("[Dry Run] 模拟删除空 PST 文件", zap.String("pst", pstPath))
+			} else {
+				_ = a.bridge.RemoveStore(pstRoot) // 提前卸载，防止文件被占用
+				time.Sleep(1 * time.Second)       // 给 Outlook 释放文件一点时间
+				if err := os.Remove(pstPath); err != nil {
+					a.logger.Error("删除空 PST 失败", zap.String("pst", pstPath), zap.Error(err))
+				} else {
+					a.logger.Info("空 PST 删除成功", zap.String("pst", pstPath))
+				}
+			}
+		} else {
+			a.logger.Info("PST 不为空，保留", zap.String("pst", pstPath))
+		}
+	}
+	
+	return nil
+}
+
+func (a *Archiver) restoreFolderItems(ctx context.Context, pstFolder outlook.FolderInfo, ostFolder *ole.IDispatch, deleteDup bool, res *ArchiveResult) error {
+	return a.bridge.Submit(func() error {
+	// 收集 OST 现有的 key 用于去重
+	var ostSet map[string]bool
+	if deleteDup {
+		ostSet = a.buildDuplicateSet(ostFolder, pstFolder.TimeField)
+	}
+
+	itemsVar, err := comutil.SafeGetProperty(pstFolder.Dispatch, "Items")
+	if err != nil || itemsVar.Value() == nil {
+		return err
+	}
+	defer itemsVar.Clear()
+	items := itemsVar.ToIDispatch()
+	defer comutil.SafeRelease(items)
+
+	countVar, err := comutil.SafeGetProperty(items, "Count")
+	if err != nil {
+		return err
+	}
+	count := int(countVar.Val)
+	countVar.Clear()
+
+	for i := count; i >= 1; i-- { // 倒序处理防止删/移动导致下标错乱
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		
+		itemVar, err := comutil.SafeCallMethod(items, "Item", i)
+		if err != nil || itemVar.Value() == nil {
+			continue
+		}
+		item := itemVar.ToIDispatch()
+		
+		res.TotalMatched++
+		
+		if deleteDup && ostSet != nil {
+			subj := a.bridge.GetSubject(item)
+			timeVal, _ := a.bridge.GetMailTime(item, pstFolder.TimeField)
+			key := fmt.Sprintf("%s_%d", subj, timeVal.Unix())
+			
+			if ostSet[key] {
+				// 重复了，删除 PST 中的
+				a.logger.Debug("发现重复邮件，拟删除源", zap.String("subject", subj))
+				if a.cfg.DryRun {
+					a.logger.Info("[Dry Run] 模拟删除重复邮件", zap.String("subject", subj))
+					res.TotalMoved++
+				} else {
+					if err := a.bridge.DeleteItem(item); err != nil {
+						a.logger.Warn("删除重复邮件失败", zap.Error(err))
+					} else {
+						res.TotalMoved++ // 把处理掉的重复件也视为处理成功
+					}
+				}
+				itemVar.Clear()
+				continue
+			} else {
+				// 未重复，加入 set 以防止 PST 内部有多份
+				ostSet[key] = true
+			}
+		}
+		
+		// 移动邮件
+		if a.cfg.DryRun {
+			a.logger.Info("[Dry Run] 模拟移动邮件", zap.String("subject", a.bridge.GetSubject(item)))
+			res.TotalMoved++
+		} else {
+			if err := a.bridge.MoveItem(item, ostFolder); err != nil {
+				a.logger.Warn("移动邮件失败", zap.Error(err))
+				res.TotalFailed++
+				res.Errors = append(res.Errors, MailError{Subject: a.bridge.GetSubject(item), Err: err})
+			} else {
+				res.TotalMoved++
+			}
+		}
+		
+		itemVar.Clear()
+		if a.cfg.MoveIntervalMs > 0 {
+			time.Sleep(time.Duration(a.cfg.MoveIntervalMs) * time.Millisecond)
+		}
+	}
+	
+	return nil
+	})
+}
+
+func (a *Archiver) buildDuplicateSet(folder *ole.IDispatch, timeField string) map[string]bool {
+	set := make(map[string]bool)
+	itemsVar, err := comutil.SafeGetProperty(folder, "Items")
+	if err != nil || itemsVar.Value() == nil {
+		return set
+	}
+	defer itemsVar.Clear()
+	items := itemsVar.ToIDispatch()
+	defer comutil.SafeRelease(items)
+
+	countVar, err := comutil.SafeGetProperty(items, "Count")
+	if err != nil {
+		return set
+	}
+	count := int(countVar.Val)
+	countVar.Clear()
+	
+	// 取前 5000 封，避免 OST 太大时卡死
+	limit := count
+	if limit > 5000 {
+		limit = 5000
+	}
+	
+	for i := 1; i <= limit; i++ {
+		itemVar, err := comutil.SafeCallMethod(items, "Item", i)
+		if err != nil || itemVar.Value() == nil {
+			continue
+		}
+		item := itemVar.ToIDispatch()
+		subj := a.bridge.GetSubject(item)
+		timeVal, _ := a.bridge.GetMailTime(item, timeField)
+		key := fmt.Sprintf("%s_%d", subj, timeVal.Unix())
+		set[key] = true
+		
+		itemVar.Clear()
+	}
+	return set
+}

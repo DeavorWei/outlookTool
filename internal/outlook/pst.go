@@ -241,3 +241,66 @@ func (b *COMBridge) IsStoreMounted(filePath string) (bool, error) {
 	})
 	return mounted, err
 }
+
+// GetMountedPSTs 返回当前已挂载的所有 PST 文件路径
+func (b *COMBridge) GetMountedPSTs() ([]string, error) {
+	var paths []string
+	err := b.Submit(func() error {
+		ns, err := b.getNamespace()
+		if err != nil {
+			return err
+		}
+		defer comutil.SafeRelease(ns)
+
+		storesVar, err := comutil.SafeGetProperty(ns, "Stores")
+		if err != nil {
+			return err
+		}
+		defer storesVar.Clear()
+		stores := storesVar.ToIDispatch()
+		defer comutil.SafeRelease(stores)
+
+		countVar, err := comutil.SafeGetProperty(stores, "Count")
+		if err != nil {
+			return err
+		}
+		count := int(countVar.Val)
+		countVar.Clear()
+
+		for i := 1; i <= count; i++ {
+			storeVar, err := comutil.SafeCallMethod(stores, "Item", i)
+			if err != nil {
+				continue
+			}
+			store := storeVar.ToIDispatch()
+			pathVar, err := comutil.SafeGetProperty(store, "FilePath")
+			if err == nil && pathVar.Value() != nil {
+				path := pathVar.ToString()
+				if strings.HasSuffix(strings.ToLower(path), ".pst") {
+					paths = append(paths, path)
+				}
+			}
+			if pathVar != nil {
+				pathVar.Clear()
+			}
+			storeVar.Clear()
+			comutil.SafeRelease(store)
+		}
+		return nil
+	})
+	return paths, err
+}
+
+// RemoveStore 卸载指定的 PST (通过其 RootFolder)
+func (b *COMBridge) RemoveStore(rootFolder *ole.IDispatch) error {
+	return b.Submit(func() error {
+		ns, err := b.getNamespace()
+		if err != nil {
+			return err
+		}
+		defer comutil.SafeRelease(ns)
+
+		_, err = comutil.SafeCallMethod(ns, "RemoveStore", rootFolder)
+		return err
+	})
+}

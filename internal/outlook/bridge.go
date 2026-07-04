@@ -93,7 +93,7 @@ func (b *COMBridge) GetActiveOutlook() (*ole.IDispatch, error) {
 	err = b.Submit(func() error {
 		unknown, errGet := oleutil.GetActiveObject("Outlook.Application")
 		if errGet != nil {
-			return fmt.Errorf("failed to get active Outlook object: %w", errGet)
+			return fmt.Errorf("请确认Outlook已打开且未以管理员身份运行 (错误原因为: %w)", errGet)
 		}
 
 		disp, errGet = unknown.QueryInterface(ole.IID_IDispatch)

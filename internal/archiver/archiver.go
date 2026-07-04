@@ -50,6 +50,11 @@ func NewArchiver(cfg *config.Config, bridge *outlook.COMBridge, logger *zap.Logg
 	}
 }
 
+// GetMountedPSTs delegates to COMBridge to fetch mounted PSTs
+func (a *Archiver) GetMountedPSTs() ([]string, error) {
+	return a.bridge.GetMountedPSTs()
+}
+
 // BuildRestrictFilter 根据文件夹类型构造 DASL 过滤条件
 func BuildRestrictFilter(timeField string, cutoffTime time.Time) string {
 	// 格式化为 Outlook 可接受的时间字符串

@@ -1,0 +1,1069 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Outlook Auto-Archiver 配置中心</title>
+    <style>
+        :root {
+            /* Vibrant modern colors - Light Blue Tech Theme */
+            --bg-grad-1: #e0f2fe;
+            --bg-grad-2: #bfdbfe;
+            --card-bg: rgba(255, 255, 255, 0.85);
+            --text-main: #1e293b;
+            --text-muted: #64748b;
+            --primary: #3b82f6;
+            --primary-hover: #2563eb;
+            --border-color: rgba(147, 197, 253, 0.6);
+            --danger: #ef4444;
+            --danger-bg: #fee2e2;
+            --success: #10b981;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+        }
+
+        body {
+            background: linear-gradient(135deg, var(--bg-grad-1) 0%, var(--bg-grad-2) 100%);
+            min-height: 100vh;
+            color: var(--text-main);
+            line-height: 1.6;
+            padding: 2rem 1rem;
+            position: relative;
+            overflow-x: hidden;
+        }
+
+        /* Glassmorphism background elements */
+        body::before, body::after {
+            content: '';
+            position: absolute;
+            width: 300px;
+            height: 300px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.1);
+            filter: blur(40px);
+            z-index: -1;
+        }
+        body::before { top: 10%; left: 5%; }
+        body::after { bottom: 10%; right: 5%; }
+
+        .container {
+            max-width: 1200px; /* Increased from 850px for two columns */
+            margin: 0 auto;
+            position: relative;
+            z-index: 1;
+        }
+
+        .grid-container {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 2rem;
+            align-items: start;
+        }
+        @media (max-width: 900px) {
+            .grid-container {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .header {
+            margin-bottom: 2.5rem;
+            text-align: center;
+            color: #0f172a;
+            text-shadow: 0 1px 2px rgba(255,255,255,0.8);
+        }
+
+        .header h1 {
+            font-size: 2.2rem;
+            margin-bottom: 0.5rem;
+            font-weight: 800;
+            letter-spacing: 0.5px;
+        }
+
+        .header p {
+            font-size: 1.05rem;
+            opacity: 0.9;
+        }
+
+        /* Glass Cards */
+        .card {
+            background: var(--card-bg);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border-radius: 16px;
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.2), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+            padding: 2.5rem;
+            margin-bottom: 2rem;
+            border: 1px solid rgba(255, 255, 255, 0.4);
+            transition: transform 0.3s ease;
+        }
+        
+        .card:hover {
+            transform: translateY(-2px);
+        }
+
+        .card-title {
+            font-size: 1.3rem;
+            font-weight: 700;
+            margin-bottom: 1.8rem;
+            padding-bottom: 0.8rem;
+            border-bottom: 2px solid rgba(59, 130, 246, 0.2);
+            color: var(--primary-hover);
+            display: flex;
+            align-items: center;
+        }
+
+        .form-group {
+            margin-bottom: 1.5rem;
+            position: relative;
+        }
+
+        .form-label-wrap {
+            display: flex;
+            align-items: center;
+            margin-bottom: 0.6rem;
+        }
+
+        .form-label {
+            font-weight: 600;
+            font-size: 0.95rem;
+            color: var(--text-main);
+        }
+
+        /* Tooltip style */
+        .help-icon {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: #e2e8f0;
+            color: var(--text-muted);
+            font-size: 0.75rem;
+            font-weight: bold;
+            margin-left: 8px;
+            cursor: help;
+            position: relative;
+            transition: all 0.2s;
+        }
+
+        .help-icon:hover {
+            background: var(--primary);
+            color: white;
+        }
+
+        .help-icon .tooltip {
+            visibility: hidden;
+            width: 280px;
+            background-color: #333;
+            color: #fff;
+            text-align: left;
+            border-radius: 6px;
+            padding: 10px 12px;
+            position: absolute;
+            z-index: 10;
+            bottom: 125%;
+            left: 50%;
+            margin-left: -140px;
+            opacity: 0;
+            transition: opacity 0.2s;
+            font-size: 0.85rem;
+            font-weight: normal;
+            line-height: 1.5;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            pointer-events: none;
+        }
+
+        .help-icon .tooltip::after {
+            content: "";
+            position: absolute;
+            top: 100%;
+            left: 50%;
+            margin-left: -5px;
+            border-width: 5px;
+            border-style: solid;
+            border-color: #333 transparent transparent transparent;
+        }
+
+        .help-icon:hover .tooltip {
+            visibility: visible;
+            opacity: 1;
+        }
+
+        input[type="text"],
+        input[type="number"],
+        select {
+            width: 100%;
+            padding: 0.7rem 1rem;
+            border: 2px solid var(--border-color);
+            border-radius: 8px;
+            font-size: 0.95rem;
+            outline: none;
+            background: rgba(255, 255, 255, 0.8);
+            transition: all 0.3s;
+        }
+
+        input[type="text"]:focus,
+        input[type="number"]:focus,
+        select:focus {
+            border-color: var(--primary);
+            box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.15);
+            background: #fff;
+        }
+        
+        .invalid-input {
+            border-color: var(--danger) !important;
+            background: var(--danger-bg) !important;
+        }
+        .error-msg {
+            color: var(--danger);
+            font-size: 0.85rem;
+            margin-top: 0.4rem;
+            display: none;
+        }
+
+        .checkbox-wrapper {
+            display: flex;
+            align-items: center;
+            cursor: pointer;
+            user-select: none;
+            padding: 0.5rem 0;
+        }
+
+        .checkbox-wrapper input {
+            appearance: none;
+            width: 1.25rem;
+            height: 1.25rem;
+            border: 2px solid var(--border-color);
+            border-radius: 4px;
+            margin-right: 0.75rem;
+            cursor: pointer;
+            position: relative;
+            transition: all 0.2s;
+        }
+
+        .checkbox-wrapper input:checked {
+            background-color: var(--primary);
+            border-color: var(--primary);
+        }
+
+        .checkbox-wrapper input:checked::after {
+            content: '✓';
+            position: absolute;
+            color: white;
+            font-size: 0.9rem;
+            font-weight: bold;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+        }
+
+        .checkbox-wrapper span {
+            font-weight: 500;
+        }
+
+        /* Tags Input */
+        .tags-container {
+            border: 2px solid var(--border-color);
+            border-radius: 8px;
+            padding: 0.4rem;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.4rem;
+            min-height: 46px;
+            background: rgba(255, 255, 255, 0.8);
+            transition: all 0.3s;
+        }
+        .tags-container:focus-within {
+            border-color: var(--primary);
+            box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.15);
+            background: #fff;
+        }
+
+        .tag {
+            background: linear-gradient(135deg, #60a5fa 0%, #3b82f6 100%);
+            color: white;
+            padding: 0.2rem 0.6rem;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            display: flex;
+            align-items: center;
+            font-weight: 500;
+            box-shadow: 0 2px 4px rgba(59, 130, 246, 0.3);
+        }
+
+        .tag-remove {
+            margin-left: 0.4rem;
+            cursor: pointer;
+            opacity: 0.7;
+            font-weight: bold;
+        }
+        .tag-remove:hover {
+            opacity: 1;
+        }
+        .tag.auto-tag {
+            background: linear-gradient(135deg, #94a3b8 0%, #64748b 100%);
+            box-shadow: 0 2px 4px rgba(100, 116, 139, 0.3);
+        }
+
+        .tag-input {
+            border: none !important;
+            outline: none !important;
+            padding: 0.3rem !important;
+            flex-grow: 1;
+            min-width: 120px;
+            box-shadow: none !important;
+            background: transparent !important;
+        }
+
+        /* Floating Action Button */
+        .fab-help {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            width: 60px;
+            height: 60px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+            color: white;
+            font-size: 1.5rem;
+            font-weight: bold;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            box-shadow: 0 4px 15px rgba(217, 119, 6, 0.4);
+            cursor: pointer;
+            transition: transform 0.3s, box-shadow 0.3s;
+            z-index: 100;
+        }
+        .fab-help:hover {
+            transform: scale(1.1) rotate(5deg);
+            box-shadow: 0 6px 20px rgba(217, 119, 6, 0.6);
+        }
+
+        /* Modal */
+        .modal-overlay {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.5);
+            backdrop-filter: blur(5px);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+        .modal-overlay.show {
+            display: flex;
+            opacity: 1;
+        }
+        .modal-content {
+            background: #fff;
+            padding: 2.5rem;
+            border-radius: 16px;
+            max-width: 600px;
+            width: 90%;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.2);
+            transform: scale(0.9);
+            transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            max-height: 85vh;
+            overflow-y: auto;
+        }
+        .modal-overlay.show .modal-content {
+            transform: scale(1);
+        }
+        .modal-close {
+            margin-top: 2rem;
+            padding: 0.7rem 1.5rem;
+            background: var(--primary);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1rem;
+            font-weight: 600;
+            width: 100%;
+            transition: background 0.2s;
+        }
+        .modal-close:hover { background: var(--primary-hover); }
+
+        /* Toast */
+        .toast-container {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            z-index: 1000;
+        }
+        .toast {
+            background: rgba(255,255,255,0.95);
+            backdrop-filter: blur(8px);
+            color: var(--text-main);
+            padding: 1rem 1.2rem;
+            border-radius: 10px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.15);
+            transform: translateX(120%);
+            opacity: 0;
+            transition: all 0.4s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+            border-left: 4px solid var(--primary);
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+        }
+        .toast.show {
+            transform: translateX(0);
+            opacity: 1;
+        }
+        .toast.error { border-left-color: var(--danger); }
+        .toast.success { border-left-color: var(--success); }
+
+        /* Buttons */
+        .btn-browse {
+            background: var(--primary);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            padding: 0 1rem;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.2s;
+            white-space: nowrap;
+        }
+        .btn-browse:hover {
+            background: var(--primary-hover);
+        }
+        
+        .btn-add-tag {
+            background: #e2e8f0;
+            color: var(--text-main);
+            border: none;
+            border-radius: 6px;
+            padding: 0.3rem 0.8rem;
+            font-size: 0.85rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            margin: 0.2rem;
+        }
+        .btn-add-tag:hover {
+            background: var(--primary);
+            color: white;
+        }
+
+        /* Layout Grid */
+        .grid-2 {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1.5rem;
+        }
+        @media (max-width: 600px) {
+            .grid-2 { grid-template-columns: 1fr; gap: 1rem; }
+            .card { padding: 1.5rem; }
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="header">
+        <h1>配置中心</h1>
+        <p>所有修改在失去焦点后自动验证并即时生效</p>
+    </div>
+
+    <form id="configForm">
+        <div class="grid-container">
+        <!-- 存储与轮询 -->
+        <div class="card">
+            <div class="card-title">🚀 基础配置</div>
+            <div class="form-group">
+                <div class="form-label-wrap">
+                    <label class="form-label" for="pst_root_path">PST 存储根目录</label>
+                    <span class="help-icon">?<span class="tooltip">所有归档生成的 PST 文件（按季度命名，如 2024_Q2.pst）都会存放在该目录下。请确保磁盘有充足空间。<br><br>示例: D:\OutlookArchives</span></span>
+                </div>
+                <input type="text" id="pst_root_path" name="PST 存储根目录" required>
+                <div class="error-msg" id="err_pst_root_path"></div>
+            </div>
+            
+            <div class="grid-2">
+                <div class="form-group">
+                    <div class="form-label-wrap">
+                        <label class="form-label" for="poll_interval_minutes">轮询间隔 (分钟)</label>
+                        <span class="help-icon">?<span class="tooltip">后台进程每隔多久自动扫描一次邮箱中的邮件。<br><br>示例: 10 (表示每 10 分钟检查一次)</span></span>
+                    </div>
+                    <input type="number" id="poll_interval_minutes" name="轮询间隔" min="1" required>
+                    <div class="error-msg" id="err_poll_interval_minutes"></div>
+                </div>
+                <div class="form-group">
+                    <div class="form-label-wrap">
+                        <label class="form-label" for="safe_delay_minutes">安全延迟 (分钟)</label>
+                        <span class="help-icon">?<span class="tooltip">仅处理早于“当前时间减去此延迟”的邮件。防止处理正与 Exchange 同步的邮件，避免 RPC 锁死。<br><br>示例: 10</span></span>
+                    </div>
+                    <input type="number" id="safe_delay_minutes" name="安全延迟" min="0" required>
+                    <div class="error-msg" id="err_safe_delay_minutes"></div>
+                </div>
+            </div>
+
+            <div class="grid-2">
+                <div class="form-group">
+                    <div class="form-label-wrap">
+                        <label class="form-label" for="retain_days">保留近期邮件 (天)</label>
+                        <span class="help-icon">?<span class="tooltip">默认跳过最近 N 天的邮件不归档，以方便在主邮箱查阅。设为 0 则归档所有符合条件的邮件。<br><br>示例: 30</span></span>
+                    </div>
+                    <input type="number" id="retain_days" name="保留近期邮件" min="0" required>
+                    <div class="error-msg" id="err_retain_days"></div>
+                </div>
+                <div class="form-group">
+                    <div class="form-label-wrap">
+                        <label class="form-label" for="max_batch_size">单次最大处理数 (封)</label>
+                        <span class="help-icon">?<span class="tooltip">每次轮询最多移动的邮件总数。限制批次可防止资源占用过高导致 Outlook 假死。<br><br>示例: 500 (0为不限)</span></span>
+                    </div>
+                    <input type="number" id="max_batch_size" name="单次最大处理数" min="0" required>
+                    <div class="error-msg" id="err_max_batch_size"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 文件夹过滤 -->
+        <div class="card">
+            <div class="card-title">📂 归档范围过滤</div>
+            <div class="form-group">
+                <div class="form-label-wrap">
+                    <label class="form-label" for="archive_mode">归档模式</label>
+                    <span class="help-icon">?<span class="tooltip">决定哪些文件夹会被归档。<br><br>all (全量模式): 归档所有文件夹，除了下面的“排除列表”中列出的文件夹。<br><br>list (白名单模式): 仅归档下面“包含列表”中明确列出的文件夹，忽略其他所有文件夹。</span></span>
+                </div>
+                <select id="archive_mode" name="归档模式">
+                    <option value="all">全量模式 (排除黑名单)</option>
+                    <option value="list">白名单模式 (仅包含指定)</option>
+                </select>
+            </div>
+            
+            <div class="form-group" id="group_exclude">
+                <div class="form-label-wrap">
+                    <label class="form-label">排除列表 (Exclude)</label>
+                    <span class="help-icon">?<span class="tooltip">全量模式下，这些文件夹不会被归档。系统自带的敏感文件夹已默认排除。<br><br>按回车添加。示例: RSS 订阅</span></span>
+                </div>
+                <div class="tags-container" id="exclude_folders_container" data-name="排除列表">
+                    <input type="text" class="tag-input" id="exclude_input" placeholder="输入名称后回车...">
+                </div>
+            </div>
+
+            <div class="form-group" id="group_include" style="display:none;">
+                <div class="form-label-wrap">
+                    <label class="form-label">包含列表 (Include)</label>
+                    <span class="help-icon">?<span class="tooltip">白名单模式下，只有这些文件夹才会被归档。支持多级(用/分隔)。<br><br>按回车添加。示例: Inbox/项目A</span></span>
+                </div>
+                <div class="tags-container" id="include_folders_container" data-name="包含列表">
+                    <input type="text" class="tag-input" id="include_input" placeholder="输入名称后回车...">
+                </div>
+                <div class="error-msg" id="err_include_folders">白名单模式下，包含列表不能为空。</div>
+            </div>
+        </div>
+
+        <!-- 高级与调试 -->
+        <div class="card">
+            <div class="card-title">⚙️ 高级与调试设置</div>
+            <div class="grid-2">
+                <div class="form-group">
+                    <div class="form-label-wrap">
+                        <label class="form-label" for="move_interval_ms">移动间隔 (毫秒)</label>
+                        <span class="help-icon">?<span class="tooltip">成功移动一封邮件后程序强制休眠的时间，给予 MAPI 喘息时间防卡顿。<br><br>示例: 50</span></span>
+                    </div>
+                    <input type="number" id="move_interval_ms" name="移动间隔" min="0" required>
+                    <div class="error-msg" id="err_move_interval_ms"></div>
+                </div>
+                <div class="form-group">
+                    <div class="form-label-wrap">
+                        <label class="form-label" for="log_retention_days">日志保留 (天)</label>
+                        <span class="help-icon">?<span class="tooltip">运行日志文件最多保留多少天。<br><br>示例: 7</span></span>
+                    </div>
+                    <input type="number" id="log_retention_days" name="日志保留" min="1" required>
+                    <div class="error-msg" id="err_log_retention_days"></div>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <div class="form-label-wrap">
+                    <label class="form-label">历史 PST 扫描目录</label>
+                    <span class="help-icon">?<span class="tooltip">用于“全量整理”纠偏功能。程序会扫描这些目录下的 .pst 文件提取邮件。<br><br>按回车添加。示例: D:\OldPSTs</span></span>
+                </div>
+                <div class="tags-container" id="legacy_pst_scan_paths_container" data-name="历史 PST 目录">
+                    <input type="text" class="tag-input" id="legacy_input" placeholder="输入绝对路径后回车...">
+                </div>
+            </div>
+            <div class="form-group" style="margin-top: 0.5rem; margin-bottom: 0.5rem;">
+                <label class="checkbox-wrapper">
+                    <input type="checkbox" id="include_mounted_psts" name="包含挂载PST">
+                    <span>自动包含 Outlook 正在挂载的数据文件所在目录</span>
+                    <span class="help-icon">?<span class="tooltip">开启后，系统会自动提取您 Outlook 中已挂载的数据文件目录，将其作为“历史 PST 扫描目录”并自动注入上方输入框。</span></span>
+                </label>
+            </div>
+            <div id="mounted_psts_list" style="margin-top: 0.5rem; display: none; font-size: 0.85rem; color: var(--text-muted); background: #f8fafc; padding: 0.8rem; border-radius: 6px; border: 1px dashed var(--border-color); height: 150px; max-height: 400px; overflow-y: auto; resize: vertical;">
+                <div style="font-weight: 600; margin-bottom: 0.5rem; color: var(--primary);">受该开关控制的数据文件：</div>
+                <ul id="mounted_psts_ul" style="margin: 0; padding-left: 1.2rem;"></ul>
+            </div>
+
+            <div class="form-group" style="margin-top: 1.5rem;">
+                <label class="checkbox-wrapper">
+                    <input type="checkbox" id="dry_run" name="模拟运行">
+                    <span>开启模拟运行 (Dry Run)</span>
+                    <span class="help-icon">?<span class="tooltip">开启后仅扫描过滤并在日志打印详情，但不执行物理移动。</span></span>
+                </label>
+            </div>
+            <div class="form-group">
+                <label class="checkbox-wrapper">
+                    <input type="checkbox" id="copy_only" name="仅复制模式">
+                    <span>开启仅复制模式 (Copy Only)</span>
+                    <span class="help-icon">?<span class="tooltip">开启后邮件会复制到 PST 中，但源邮箱不会删除。</span></span>
+                </label>
+            </div>
+            <div class="form-group">
+                <label class="checkbox-wrapper">
+                    <input type="checkbox" id="auto_start" name="开机自启">
+                    <span>开机自动启动 (Auto Start)</span>
+                    <span class="help-icon">?<span class="tooltip">开启后，Outlook 归档助手会在开机时自动运行并最小化到系统托盘。</span></span>
+                </label>
+            </div>
+            <div class="form-group">
+                <label class="checkbox-wrapper">
+                    <input type="checkbox" id="debug_log" name="调试日志">
+                    <span>输出详细调试日志</span>
+                </label>
+            </div>
+        </div> <!-- grid-container -->
+
+        <div style="margin-top: 4rem; display: flex; justify-content: center;">
+            <div class="card" style="border: 1.5px solid #ef4444; width: 100%; max-width: 500px; background: rgba(254, 242, 242, 0.4); margin-bottom: 0;">
+                <div class="card-title" style="color: #ef4444; border-bottom: 2px solid rgba(239, 68, 68, 0.2); justify-content: center;">⚠️ 危险操作 (Danger Zone)</div>
+                <div class="form-group" style="margin-top: 1rem; text-align: center;">
+                    <div style="font-size: 0.9rem; color: #6b7280; margin-bottom: 1.5rem; line-height: 1.5;">
+                        将当前挂载的 PST 及历史目录中的邮件逆向还原回主数据文件 (OST)。
+                    </div>
+                    <button type="button" id="btnRestore" style="background: #ef4444; color: white; border: none; padding: 0.8rem 2rem; border-radius: 6px; font-weight: 600; cursor: pointer; box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);">
+                        还原数据至主邮箱
+                    </button>
+                </div>
+            </div>
+        </div>
+    </form>
+</div>
+
+<!-- Restore Modal -->
+<div class="modal-overlay" id="restoreModal">
+    <div class="modal-content">
+        <h2 style="margin-bottom: 1rem; color: #ef4444; font-size: 1.5rem;">⚠️ 确认还原数据</h2>
+        <p style="margin-bottom: 1rem; color: #4b5563;">
+            此操作将遍历所有挂载的 PST 和历史 PST，把其中的邮件移动回主邮箱 (OST)！<br>
+            <strong>注意：如果数据量极大，可能会导致主邮箱容量达到上限 (50GB) 并引起 Outlook 崩溃。请确认有足够的空间！</strong>
+        </p>
+        
+        <div style="margin: 1.5rem 0; padding: 1rem; background: #fef2f2; border: 1px solid #fecaca; border-radius: 6px;">
+            <label class="checkbox-wrapper" style="margin-bottom: 0.8rem;">
+                <input type="checkbox" id="chkDeleteEmptyPst">
+                <span style="color: #991b1b; font-weight: 500;">还原后删除空的 PST 文件 (若文件被彻底清空则从磁盘物理删除)</span>
+            </label>
+            <label class="checkbox-wrapper">
+                <input type="checkbox" id="chkDeleteDuplicates">
+                <span style="color: #991b1b; font-weight: 500;">删除重复邮件 (若主邮箱已有该邮件，则直接删除 PST 中的对应副本)</span>
+            </label>
+        </div>
+
+        <div style="display: flex; gap: 1rem; justify-content: flex-end; margin-top: 1.5rem;">
+            <button class="modal-close" id="btnCancelRestore" style="background: #e5e7eb; color: #374151;">取消</button>
+            <button class="modal-close" id="btnConfirmRestore" style="background: #ef4444; color: white;">确认并开始还原</button>
+        </div>
+    </div>
+</div>
+
+<!-- Help FAB -->
+<div class="fab-help" id="btnHelp" title="帮助中心">?</div>
+
+<!-- Help Modal -->
+<div class="modal-overlay" id="helpModal">
+    <div class="modal-content">
+        <h2 style="margin-bottom: 1rem; color: var(--primary); font-size: 1.5rem;">💡 Outlook 归档助手使用指南</h2>
+        <p style="margin-bottom: 1rem; color: #4b5563;">欢迎使用 Outlook Auto-Archiver！本程序能在后台静默运行，根据您的规则自动将旧邮件归档到按季度划分的本地 PST 文件中，防止邮箱爆满。</p>
+        
+        <h3 style="margin: 1.5rem 0 0.5rem 0; font-size: 1.1rem;">📝 如何设置？</h3>
+        <ul style="padding-left: 1.5rem; color: #4b5563; margin-bottom: 1rem;">
+            <li>直接在表单中修改您需要的参数，<strong>修改完成后离开输入框即可自动保存</strong>，无需手动点击保存按钮。</li>
+            <li>鼠标悬浮在每个选项名称旁的 <span style="background:#e2e8f0;border-radius:50%;padding:0 5px;font-size:0.8em">?</span> 图标上可以查看详细说明。</li>
+            <li>修改“基础配置”如间隔等，程序会立刻重载生效。</li>
+        </ul>
+
+        <h3 style="margin: 1.5rem 0 0.5rem 0; font-size: 1.1rem;">🛡️ 安全建议 (首次使用)</h3>
+        <ol style="padding-left: 1.5rem; color: #4b5563;">
+            <li>建议首次运行前勾选底部的 <strong>开启模拟运行 (Dry Run)</strong>。</li>
+            <li>在托盘菜单点击“立即执行一次”，然后查看日志以确认哪些邮件会被移动。</li>
+            <li>确认无误后，在此页面取消勾选 Dry Run，即可开启真实的自动化归档。</li>
+        </ol>
+
+        <button class="modal-close" id="btnCloseHelp">我知道了</button>
+    </div>
+</div>
+
+<div class="toast-container" id="toastContainer"></div>
+
+<script>
+    let state = {};
+    let isDataLoaded = false;
+    let autoMountedPSTs = [];
+    let autoMountedDirs = [];
+    const urlParams = new URLSearchParams(window.location.search);
+
+    // Heartbeat mechanism
+    setInterval(() => {
+        fetch('/api/heartbeat', { method: 'POST' }).catch(err => console.error("Heartbeat failed", err));
+    }, 30000);
+
+    // Modal Logic
+    const helpModal = document.getElementById('helpModal');
+    document.getElementById('btnHelp').onclick = () => helpModal.classList.add('show');
+    document.getElementById('btnCloseHelp').onclick = () => helpModal.classList.remove('show');
+    
+    if (urlParams.get('first_run') === 'true') {
+        setTimeout(() => helpModal.classList.add('show'), 500);
+    }
+
+    // Toast Notification
+    function showToast(msg, type = 'success') {
+        const container = document.getElementById('toastContainer');
+        const toast = document.createElement('div');
+        toast.className = `toast ${type}`;
+        toast.innerHTML = type === 'success' ? `✅ &nbsp; ${msg}` : `❌ &nbsp; ${msg}`;
+        container.appendChild(toast);
+        
+        // Trigger reflow for animation
+        toast.offsetHeight; 
+        toast.classList.add('show');
+
+        setTimeout(() => {
+            toast.classList.remove('show');
+            setTimeout(() => toast.remove(), 400);
+        }, 3000);
+    }
+
+    // Field Validation and Styling
+    function setInvalid(id, msg) {
+        const el = document.getElementById(id);
+        const err = document.getElementById('err_' + id);
+        if(el) el.classList.add('invalid-input');
+        if(err) {
+            err.textContent = msg;
+            err.style.display = 'block';
+        }
+    }
+
+    function clearInvalid(id) {
+        const el = document.getElementById(id);
+        const err = document.getElementById('err_' + id);
+        if(el) el.classList.remove('invalid-input');
+        if(err) err.style.display = 'none';
+    }
+
+    function validateAll() {
+        let valid = true;
+        document.querySelectorAll('input[type="number"], input[type="text"]').forEach(input => {
+            if(input.classList.contains('tag-input')) return;
+            clearInvalid(input.id);
+            if (!input.value.trim() && input.required) {
+                setInvalid(input.id, '此项不能为空');
+                valid = false;
+            } else if (input.type === 'number' && parseInt(input.value) < parseInt(input.min||0)) {
+                setInvalid(input.id, '数值不能小于 ' + (input.min||0));
+                valid = false;
+            }
+        });
+
+        const mode = document.getElementById('archive_mode').value;
+        clearInvalid('include_folders');
+        if (mode === 'list' && state.include_folders.length === 0) {
+            const container = document.getElementById('include_folders_container');
+            container.classList.add('invalid-input');
+            const err = document.getElementById('err_include_folders');
+            if(err) err.style.display = 'block';
+            valid = false;
+        } else {
+            document.getElementById('include_folders_container').classList.remove('invalid-input');
+            const err = document.getElementById('err_include_folders');
+            if(err) err.style.display = 'none';
+        }
+
+        return valid;
+    }
+
+    // Auto-save logic
+    function triggerSave(fieldName) {
+        if (!isDataLoaded) return;
+        
+        if (!validateAll()) {
+            showToast('配置校验失败，请检查标红项', 'error');
+            return;
+        }
+
+        fetch('/api/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(state)
+        })
+        .then(async (res) => {
+            if (!res.ok) throw new Error(await res.text());
+            return res.json();
+        })
+        .then(() => {
+            const name = fieldName ? `[${fieldName}] ` : '';
+            showToast(`${name}配置已自动保存`);
+        })
+        .catch(err => {
+            showToast('保存失败: ' + err.message, 'error');
+        });
+    }
+
+    // Attach listeners
+    document.querySelectorAll('input, select').forEach(el => {
+        if (el.classList.contains('tag-input')) return;
+        if (el.id === 'include_mounted_psts') return;
+        
+        const eventName = (el.type === 'checkbox' || el.tagName === 'SELECT') ? 'change' : 'blur';
+        el.addEventListener(eventName, () => {
+            state[el.id] = el.type === 'checkbox' ? el.checked : (el.type === 'number' ? parseInt(el.value) : el.value);
+            triggerSave(el.name || el.id);
+        });
+    });
+
+    document.getElementById('include_mounted_psts').addEventListener('change', () => {
+        state.include_mounted_psts = document.getElementById('include_mounted_psts').checked;
+        updateMountedPSTsUI();
+        renderLegacy();
+        triggerSave('包含挂载PST');
+    });
+
+    function updateMountedPSTsUI(errorMsg = null) {
+        const listDiv = document.getElementById('mounted_psts_list');
+        const ul = document.getElementById('mounted_psts_ul');
+        if (!listDiv || !ul) return;
+        ul.innerHTML = '';
+        
+        if (!document.getElementById('include_mounted_psts').checked) {
+            listDiv.style.display = 'none';
+            return;
+        }
+
+        listDiv.style.display = 'block';
+
+        if (errorMsg) {
+            const li = document.createElement('li');
+            li.style.color = 'red';
+            li.textContent = '无法获取: ' + errorMsg + ' (请确认Outlook已打开)';
+            ul.appendChild(li);
+        } else if (autoMountedPSTs && autoMountedPSTs.length > 0) {
+            autoMountedPSTs.forEach(pst => {
+                const li = document.createElement('li');
+                li.textContent = pst;
+                ul.appendChild(li);
+            });
+        } else {
+            const li = document.createElement('li');
+            li.style.color = '#888';
+            li.textContent = '当前没有检测到额外挂载的 PST 文件。';
+            ul.appendChild(li);
+        }
+    }
+
+    // Tags Management
+    function setupTagInput(containerId, inputId, stateKey) {
+        const container = document.getElementById(containerId);
+        const input = document.getElementById(inputId);
+        const fieldName = container.getAttribute('data-name');
+
+        function render() {
+            container.querySelectorAll('.tag').forEach(el => el.remove());
+            
+            state[stateKey].forEach((tag, index) => {
+                const tagEl = document.createElement('span');
+                tagEl.className = 'tag';
+                tagEl.textContent = tag;
+                
+                const removeBtn = document.createElement('span');
+                removeBtn.className = 'tag-remove';
+                removeBtn.textContent = '×';
+                removeBtn.onclick = () => {
+                    state[stateKey].splice(index, 1);
+                    render();
+                    triggerSave(fieldName);
+                };
+                
+                tagEl.appendChild(removeBtn);
+                container.insertBefore(tagEl, input);
+            });
+
+            if (stateKey === 'legacy_pst_scan_paths' && document.getElementById('include_mounted_psts').checked) {
+                autoMountedDirs.forEach(dir => {
+                    if (!state[stateKey].includes(dir)) {
+                        const tagEl = document.createElement('span');
+                        tagEl.className = 'tag auto-tag';
+                        tagEl.textContent = 'Auto: ' + dir;
+                        container.insertBefore(tagEl, input);
+                    }
+                });
+            }
+        }
+
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                const val = input.value.trim();
+                if (val && !state[stateKey].includes(val)) {
+                    state[stateKey].push(val);
+                    input.value = '';
+                    render();
+                    triggerSave(fieldName);
+                }
+            }
+        });
+        
+        // Remove focus blur save for tag input as it's triggered by Enter
+        return render;
+    }
+
+    const renderExclude = setupTagInput('exclude_folders_container', 'exclude_input', 'exclude_folders');
+    const renderInclude = setupTagInput('include_folders_container', 'include_input', 'include_folders');
+    const renderLegacy = setupTagInput('legacy_pst_scan_paths_container', 'legacy_input', 'legacy_pst_scan_paths');
+
+    // Archive Mode Switch UI handling
+    const modeSelect = document.getElementById('archive_mode');
+    const groupExclude = document.getElementById('group_exclude');
+    const groupInclude = document.getElementById('group_include');
+
+    // Restore Modal Logic
+    const btnRestore = document.getElementById('btnRestore');
+    const restoreModal = document.getElementById('restoreModal');
+    const btnCancelRestore = document.getElementById('btnCancelRestore');
+    const btnConfirmRestore = document.getElementById('btnConfirmRestore');
+
+    btnRestore.addEventListener('click', () => {
+        restoreModal.classList.add('show');
+    });
+    
+    btnCancelRestore.addEventListener('click', () => {
+        restoreModal.classList.remove('show');
+    });
+    
+    btnConfirmRestore.addEventListener('click', () => {
+        restoreModal.classList.remove('show');
+        
+        const deleteEmpty = document.getElementById('chkDeleteEmptyPst').checked;
+        const deleteDup = document.getElementById('chkDeleteDuplicates').checked;
+        
+        fetch('/api/restore', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                delete_empty_pst: deleteEmpty,
+                delete_duplicates: deleteDup
+            })
+        })
+        .then(async res => {
+            if (!res.ok) throw new Error(await res.text());
+            showToast('还原任务已在后台启动，请查看日志！', 'success');
+        })
+        .catch(err => {
+            showToast('请求失败: ' + err.message, 'error');
+        });
+    });
+
+    // Modal behavior for click outside
+    restoreModal.addEventListener('click', (e) => {
+        if (e.target === restoreModal) {
+            restoreModal.classList.remove('show');
+        }
+    });
+
+    modeSelect.addEventListener('change', (e) => {
+        if (e.target.value === 'all') {
+            groupExclude.style.display = 'block';
+            groupInclude.style.display = 'none';
+        } else {
+            groupExclude.style.display = 'none';
+            groupInclude.style.display = 'block';
+        }
+    });
+
+    // Load Data
+    fetch('/api/config')
+        .then(res => res.json())
+        .then(data => {
+            document.getElementById('pst_root_path').value = data.pst_root_path || '';
+            document.getElementById('poll_interval_minutes').value = data.poll_interval_minutes || 10;
+            document.getElementById('safe_delay_minutes').value = data.safe_delay_minutes || 10;
+            document.getElementById('retain_days').value = data.retain_days !== undefined ? data.retain_days : 30;
+            document.getElementById('max_batch_size').value = data.max_batch_size !== undefined ? data.max_batch_size : 500;
+            
+            modeSelect.value = data.archive_mode || 'all';
+            modeSelect.dispatchEvent(new Event('change'));
+
+            document.getElementById('log_retention_days').value = data.log_retention_days || 7;
+            document.getElementById('move_interval_ms').value = data.move_interval_ms || 50;
+
+            document.getElementById('auto_start').checked = !!data.auto_start;
+            document.getElementById('include_mounted_psts').checked = !!data.include_mounted_psts;
+            document.getElementById('dry_run').checked = !!data.dry_run;
+            document.getElementById('copy_only').checked = !!data.copy_only;
+            document.getElementById('debug_log').checked = !!data.debug_log;
+
+            Object.assign(state, data);
+            if (!state.exclude_folders) state.exclude_folders = [];
+            if (!state.include_folders) state.include_folders = [];
+            if (!state.legacy_pst_scan_paths) state.legacy_pst_scan_paths = [];
+
+            renderExclude();
+            renderInclude();
+            
+            // Fetch mounted PSTs
+            fetch('/api/mounted-psts')
+                .then(res => res.json())
+                .then(psts => {
+                    if (psts && Array.isArray(psts)) {
+                        autoMountedPSTs = psts;
+                        const root = data.pst_root_path ? data.pst_root_path.toLowerCase() : '';
+                        
+                        // Extract directories, avoid the root path
+                        const dirs = new Set();
+                        psts.forEach(p => {
+                            const lastSlash = Math.max(p.lastIndexOf('\\'), p.lastIndexOf('/'));
+                            if (lastSlash > 0) {
+                                const dir = p.substring(0, lastSlash);
+                                if (dir.toLowerCase() !== root) {
+                                    dirs.add(dir);
+                                }
+                            }
+                        });
+                        autoMountedDirs = Array.from(dirs);
+                        
+                        updateMountedPSTsUI();
+                        renderLegacy();
+                    }
+                })
+                .catch(err => {
+                    console.error("Failed to load mounted PSTs", err);
+                    updateMountedPSTsUI(err.message || '网络或接口错误');
+                    renderLegacy();
+                })
+                .finally(() => {
+                    isDataLoaded = true; // Enable auto-save after initial load
+                });
+        })
+        .catch(err => {
+            showToast('加载配置失败: ' + err, 'error');
+        });
+</script>
+
+</body>
+</html>

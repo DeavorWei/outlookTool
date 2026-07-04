@@ -246,3 +246,30 @@ func getTimeField(folder *ole.IDispatch, name string, sentItemsID string) string
 	}
 	return "ReceivedTime"
 }
+
+// GetDefaultMailboxRoot 获取主邮箱（OST）的根目录
+func (b *COMBridge) GetDefaultMailboxRoot() (*ole.IDispatch, error) {
+	var root *ole.IDispatch
+	err := b.Submit(func() error {
+		ns, err := b.getNamespace()
+		if err != nil {
+			return err
+		}
+		defer comutil.SafeRelease(ns)
+
+		inboxVar, err := comutil.SafeCallMethod(ns, "GetDefaultFolder", 6) // olFolderInbox
+		if err != nil {
+			return err
+		}
+		defer inboxVar.Clear()
+		inbox := inboxVar.ToIDispatch()
+
+		parentVar, err := comutil.SafeGetProperty(inbox, "Parent")
+		if err != nil {
+			return err
+		}
+		root = parentVar.ToIDispatch()
+		return nil
+	})
+	return root, err
+}

@@ -19,6 +19,7 @@ const (
 	StateIdle SchedulerState = iota
 	StateArchiving
 	StateReorganizing
+	StateRestoring
 	StatePaused
 )
 
@@ -37,6 +38,11 @@ func (s *Scheduler) GetConfigCopy() config.Config {
 	return *s.cfg
 }
 
+// GetMountedPSTs delegates to Archiver to fetch mounted PSTs
+func (s *Scheduler) GetMountedPSTs() ([]string, error) {
+	return s.archiver.GetMountedPSTs()
+}
+
 // ReloadConfig 从文件重新加载配置
 func (s *Scheduler) ReloadConfig(path string) error {
 	s.mu.Lock()
@@ -46,7 +52,7 @@ func (s *Scheduler) ReloadConfig(path string) error {
 		return fmt.Errorf("当前状态不可重新加载配置，请在空闲时重试")
 	}
 
-	newCfg, err := config.LoadConfig(path)
+	newCfg, _, err := config.LoadConfig(path)
 	if err != nil {
 		return err
 	}
@@ -248,6 +254,51 @@ func (s *Scheduler) TriggerReorganize(ctx context.Context, progressCb func(Progr
 	}
 
 	s.logger.Info("全量整理任务完成", zap.Any("result", res))
+	return nil
+}
+
+type RestoreRequest struct {
+	DeleteEmptyPST   bool `json:"delete_empty_pst"`
+	DeleteDuplicates bool `json:"delete_duplicates"`
+}
+
+// TriggerRestore 触发还原任务
+func (s *Scheduler) TriggerRestore(ctx context.Context, req RestoreRequest) error {
+	s.mu.Lock()
+	if s.state != StateIdle {
+		s.mu.Unlock()
+		return fmt.Errorf("当前状态不可触发还原: %v", s.state)
+	}
+	s.state = StateRestoring
+
+	// 暂停定时器
+	if s.ticker != nil {
+		s.ticker.Stop()
+	}
+	s.mu.Unlock()
+
+	defer func() {
+		s.mu.Lock()
+		s.state = StateIdle
+		if s.ticker != nil {
+			interval := time.Duration(s.cfg.PollIntervalMin) * time.Minute
+			if interval <= 0 {
+				interval = 60 * time.Minute
+			}
+			s.ticker.Reset(interval)
+		}
+		s.mu.Unlock()
+	}()
+
+	s.logger.Info("开始还原任务", zap.Bool("deleteEmpty", req.DeleteEmptyPST), zap.Bool("deleteDup", req.DeleteDuplicates))
+
+	res, err := s.archiver.Restore(ctx, req.DeleteEmptyPST, req.DeleteDuplicates)
+	if err != nil {
+		s.logger.Error("还原任务失败", zap.Error(err))
+		return err
+	}
+
+	s.logger.Info("还原任务完成", zap.Any("result", res))
 	return nil
 }
 
