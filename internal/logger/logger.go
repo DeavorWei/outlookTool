@@ -15,6 +15,22 @@ import (
 // CurrentLogDir 保存当前实际使用的日志目录
 var CurrentLogDir string
 
+// LogBroadcast 广播实时日志的通道
+var LogBroadcast = make(chan string, 200)
+
+type broadcastSyncer struct{}
+
+func (b *broadcastSyncer) Write(p []byte) (n int, err error) {
+	// 非阻塞写入，防止影响正常业务
+	select {
+	case LogBroadcast <- string(p):
+	default:
+	}
+	return len(p), nil
+}
+
+func (b *broadcastSyncer) Sync() error { return nil }
+
 // InitLogger 初始化 zap + lumberjack 日志模块
 func InitLogger(cfg *config.Config) (*zap.Logger, error) {
 	logDir := filepath.Join(exeDir(), "logs")
@@ -57,7 +73,14 @@ func InitLogger(cfg *config.Config) (*zap.Logger, error) {
 		zapcore.DebugLevel,
 	)
 
-	core := zapcore.NewTee(fileCore, consoleCore)
+	// Web SSE 广播 Core，使用 JSON 格式以便于前端解析颜色和字段
+	broadcastCore := zapcore.NewCore(
+		zapcore.NewJSONEncoder(encoderConfig),
+		zapcore.AddSync(&broadcastSyncer{}),
+		zapcore.DebugLevel,
+	)
+
+	core := zapcore.NewTee(fileCore, consoleCore, broadcastCore)
 	return zap.New(core, zap.AddCaller()), nil
 }
 

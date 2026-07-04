@@ -8,11 +8,14 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"os"
+	"os/exec"
 	"sync"
 	"time"
 
 	"go.uber.org/zap"
 	"outlook-archiver/internal/config"
+	"outlook-archiver/internal/logger"
 	"outlook-archiver/internal/registry"
 	"outlook-archiver/internal/scheduler"
 )
@@ -61,6 +64,14 @@ func (ws *WebServer) Start() (int, error) {
 	mux.HandleFunc("/api/heartbeat", ws.handleHeartbeat)
 	mux.HandleFunc("/api/mounted-psts", ws.handleMountedPSTs)
 	mux.HandleFunc("/api/restore", ws.handleRestore)
+	
+	mux.HandleFunc("/api/logs/stream", ws.handleLogStream)
+	mux.HandleFunc("/api/actions/trigger", ws.handleActionTrigger)
+	mux.HandleFunc("/api/actions/reorganize", ws.handleActionReorganize)
+	mux.HandleFunc("/api/actions/reload", ws.handleActionReload)
+	mux.HandleFunc("/api/actions/open-dir", ws.handleActionOpenDir)
+	mux.HandleFunc("/api/actions/autostart", ws.handleActionAutostart)
+	mux.HandleFunc("/api/actions/quit", ws.handleActionQuit)
 	
 	// Static files
 	webSubFS, err := fs.Sub(webFS, "web")
@@ -259,4 +270,86 @@ func (ws *WebServer) IsRunning() bool {
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
 	return ws.isRunning
+}
+
+// Actions
+
+func (ws *WebServer) handleActionTrigger(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost { http.Error(w, "Method not allowed", http.StatusMethodNotAllowed); return }
+	go ws.sched.TriggerOnce(context.Background())
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"success"}`))
+}
+
+func (ws *WebServer) handleActionReorganize(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost { http.Error(w, "Method not allowed", http.StatusMethodNotAllowed); return }
+	go ws.sched.TriggerReorganize(context.Background(), func(info scheduler.ProgressInfo) {
+		ws.logger.Info("全量整理进度", zap.Int("phase", info.Phase), zap.Int("processed", info.Processed))
+	})
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"success"}`))
+}
+
+func (ws *WebServer) handleActionReload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost { http.Error(w, "Method not allowed", http.StatusMethodNotAllowed); return }
+	err := ws.sched.ReloadConfig(ws.cfgPath)
+	if err != nil {
+		ws.logger.Error("重新加载配置失败", zap.Error(err))
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	ws.logger.Info("重新加载配置成功")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"success"}`))
+}
+
+func (ws *WebServer) handleActionOpenDir(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost { http.Error(w, "Method not allowed", http.StatusMethodNotAllowed); return }
+	target := r.URL.Query().Get("target")
+	if target == "log" {
+		if logger.CurrentLogDir != "" {
+			exec.Command("explorer", logger.CurrentLogDir).Start()
+		}
+	} else if target == "config" {
+		exec.Command("cmd", "/c", "start", "", ws.cfgPath).Start()
+	}
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"success"}`))
+}
+
+func (ws *WebServer) handleActionAutostart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost { http.Error(w, "Method not allowed", http.StatusMethodNotAllowed); return }
+	var req struct { Enabled bool `json:"enabled"` }
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := registry.SetAutoStart(req.Enabled); err != nil {
+		ws.logger.Error("设置开机自启失败", zap.Error(err))
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if req.Enabled {
+		ws.logger.Info("已开启开机自启")
+	} else {
+		ws.logger.Info("已关闭开机自启")
+	}
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"success"}`))
+}
+
+func (ws *WebServer) handleActionQuit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost { http.Error(w, "Method not allowed", http.StatusMethodNotAllowed); return }
+	if ws.sched.GetState() == scheduler.StateReorganizing {
+		http.Error(w, "全量整理中，禁止退出", http.StatusConflict)
+		return
+	}
+	ws.logger.Info("用户通过控制台触发退出程序")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"success"}`))
+	
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		os.Exit(0)
+	}()
 }
