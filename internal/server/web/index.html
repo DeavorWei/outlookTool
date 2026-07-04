@@ -146,32 +146,37 @@
             <div class="action-grid">
                 <div class="action-card" onclick="doAction('trigger')">
                     <div class="action-icon">🚀</div>
-                    <div class="action-title">立即执行</div>
+                    <div class="action-title">立即执行<span class="help-icon">?<span class="tooltip">执行一次常规归档流程，把符合条件的邮件按照配置移动到PST文件中。</span></span></div>
                     <div class="action-desc">触发一次常规归档</div>
                 </div>
                 <div class="action-card" onclick="doAction('reorganize')">
                     <div class="action-icon">🧹</div>
-                    <div class="action-title">全量整理</div>
+                    <div class="action-title">全量整理<span class="help-icon">?<span class="tooltip">执行全量归档，并扫描历史PST目录进行纠偏，修复因异常导致的邮件遗漏。</span></span></div>
                     <div class="action-desc">归档+PST纠偏修复</div>
                 </div>
                 <div class="action-card" onclick="doAction('reload')">
                     <div class="action-icon">🔄</div>
-                    <div class="action-title">重载配置</div>
+                    <div class="action-title">重载配置<span class="help-icon">?<span class="tooltip">重新加载配置文件并在后台生效，无需重启程序。</span></span></div>
                     <div class="action-desc">使配置修改立即生效</div>
                 </div>
                 <div class="action-card" onclick="doAction('open-dir?target=log')">
                     <div class="action-icon">🗂️</div>
-                    <div class="action-title">日志目录</div>
+                    <div class="action-title">日志目录<span class="help-icon">?<span class="tooltip">打开资源管理器，定位到程序运行产生的日志文件目录。</span></span></div>
                     <div class="action-desc">在资源管理器中打开</div>
                 </div>
                 <div class="action-card" onclick="doAction('open-dir?target=config')">
                     <div class="action-icon">📝</div>
-                    <div class="action-title">配置文件</div>
+                    <div class="action-title">配置文件<span class="help-icon">?<span class="tooltip">使用系统的默认文本编辑器打开当前的 JSON 配置文件。</span></span></div>
                     <div class="action-desc">使用默认编辑器打开</div>
+                </div>
+                <div class="action-card" style="border-color: #fca5a5;" onclick="document.getElementById('restoreModal').classList.add('show')">
+                    <div class="action-icon" style="color: #ef4444;">🔙</div>
+                    <div class="action-title" style="color: #ef4444;">还原数据<span class="help-icon">?<span class="tooltip">打开还原向导，将已归档到 PST 中的邮件逆向还原回主数据文件 (OST)。</span></span></div>
+                    <div class="action-desc">还原归档至主邮箱</div>
                 </div>
                 <div class="action-card" style="border-color: #fca5a5;" onclick="confirmQuit()">
                     <div class="action-icon" style="color: #ef4444;">🛑</div>
-                    <div class="action-title" style="color: #ef4444;">退出程序</div>
+                    <div class="action-title" style="color: #ef4444;">退出程序<span class="help-icon">?<span class="tooltip">安全停止后台自动归档服务，并完全退出本程序。</span></span></div>
                     <div class="action-desc">安全关闭归档服务</div>
                 </div>
             </div>
@@ -292,19 +297,7 @@
                         </div>
                     </div>
                 </div>
-            <div style="margin-top: 4rem; display: flex; justify-content: center;">
-                <div class="card" style="border: 1.5px solid #ef4444; width: 100%; max-width: 500px; background: rgba(254, 242, 242, 0.4); margin-bottom: 0;">
-                    <div class="card-title" style="color: #ef4444; border-bottom: 2px solid rgba(239, 68, 68, 0.2); justify-content: center;">⚠️ 危险操作 (Danger Zone)</div>
-                    <div class="form-group" style="margin-top: 1rem; text-align: center;">
-                        <div style="font-size: 0.9rem; color: #6b7280; margin-bottom: 1.5rem; line-height: 1.5;">
-                            将当前挂载的 PST 及历史目录中的邮件逆向还原回主数据文件 (OST)。
-                        </div>
-                        <button type="button" id="btnRestore" style="background: #ef4444; color: white; border: none; padding: 0.8rem 2rem; border-radius: 6px; font-weight: 600; cursor: pointer; box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);">
-                            还原数据至主邮箱
-                        </button>
-                    </div>
-                </div>
-            </div>
+
             </form>
         </div>
     </div>
@@ -384,16 +377,9 @@
     }
 
     // Restore Modal Logic
-    const btnRestore = document.getElementById('btnRestore');
     const restoreModal = document.getElementById('restoreModal');
     const btnCancelRestore = document.getElementById('btnCancelRestore');
     const btnConfirmRestore = document.getElementById('btnConfirmRestore');
-
-    if (btnRestore) {
-        btnRestore.addEventListener('click', () => {
-            restoreModal.classList.add('show');
-        });
-    }
     if (btnCancelRestore) {
         btnCancelRestore.addEventListener('click', () => {
             restoreModal.classList.remove('show');
