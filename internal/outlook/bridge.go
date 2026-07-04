@@ -3,10 +3,11 @@ package outlook
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"runtime"
 	"strings"
-	"unsafe"
 	"sync/atomic"
+	"unsafe"
 
 	"github.com/go-ole/go-ole"
 	"github.com/go-ole/go-ole/oleutil"
@@ -110,3 +111,35 @@ func (b *COMBridge) GetActiveOutlook() (*ole.IDispatch, error) {
 	}
 	return disp, nil
 }
+
+// QuitOutlook 尝试通过 COM 接口优雅关闭 Outlook
+func (b *COMBridge) QuitOutlook() error {
+	return b.Submit(func() error {
+		unknown, errGet := oleutil.GetActiveObject("Outlook.Application")
+		if errGet != nil {
+			return nil // 已经没有运行，或者无法获取，则视作已经关闭
+		}
+		disp, errQuery := unknown.QueryInterface(ole.IID_IDispatch)
+		unknown.Release()
+		if errQuery != nil {
+			return errQuery
+		}
+		defer disp.Release()
+
+		_, errCall := oleutil.CallMethod(disp, "Quit")
+		return errCall
+	})
+}
+
+// ForceKillOutlook 强制结束 Outlook 进程
+func ForceKillOutlook() error {
+	cmd := exec.Command("taskkill", "/F", "/IM", "OUTLOOK.EXE")
+	return cmd.Run()
+}
+
+// StartOutlook 通过命令行启动 Outlook
+func StartOutlook() error {
+	cmd := exec.Command("cmd", "/c", "start", "outlook")
+	return cmd.Start()
+}
+

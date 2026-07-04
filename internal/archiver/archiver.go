@@ -3,6 +3,7 @@ package archiver
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -62,23 +63,60 @@ func (a *Archiver) AddPendingDelete(path string) {
 	a.logger.Info("已加入待删除列表", zap.String("pst", path))
 }
 
-// ProcessPendingDeletions 处理所有待删除的 PST 文件，使用退避重试策略
-func (a *Archiver) ProcessPendingDeletions() {
+// GetAndClearPendingDeletes 获取所有待删除的 PST 文件列表，并清空原列表
+func (a *Archiver) GetAndClearPendingDeletes() []string {
 	a.pendingMu.Lock()
+	defer a.pendingMu.Unlock()
 	if len(a.pendingDeletes) == 0 {
-		a.pendingMu.Unlock()
-		return
+		return nil
 	}
-	// 取出列表并清空，释放锁后再执行删除
 	paths := make([]string, len(a.pendingDeletes))
 	copy(paths, a.pendingDeletes)
 	a.pendingDeletes = nil
-	a.pendingMu.Unlock()
+	return paths
+}
 
-	a.logger.Info("开始处理待删除 PST 文件", zap.Int("count", len(paths)))
-	for _, p := range paths {
-		a.deleteFileWithRetry(p)
+// ExecuteIndependentDeletion 执行独立的空文件删除流程：关 Outlook、删文件、拉起 Outlook
+func (a *Archiver) ExecuteIndependentDeletion() {
+	pending := a.GetAndClearPendingDeletes()
+	if len(pending) == 0 {
+		return
 	}
+	a.logger.Info("开始执行独立删除流程，准备关闭 Outlook", zap.Int("count", len(pending)))
+
+	// 1. 尝试优雅关闭
+	a.bridge.QuitOutlook()
+	
+	// 等待并检测是否真的关闭
+	closed := false
+	for i := 0; i < 5; i++ {
+		time.Sleep(2 * time.Second)
+		if !outlook.IsOutlookRunning() {
+			closed = true
+			break
+		}
+	}
+	
+	// 2. 强制杀进程
+	if !closed {
+		a.logger.Warn("优雅退出 Outlook 失败，执行强杀")
+		outlook.ForceKillOutlook()
+		time.Sleep(2 * time.Second)
+	}
+
+	// 3. 删除文件
+	for _, p := range pending {
+		err := os.Remove(p) // 注意需要确保 os 包被引入
+		if err != nil {
+			a.logger.Error("物理删除 PST 失败", zap.String("pst", p), zap.Error(err))
+		} else {
+			a.logger.Info("物理删除 PST 成功", zap.String("pst", p))
+		}
+	}
+
+	// 4. 重启 Outlook
+	a.logger.Info("准备重新启动 Outlook")
+	outlook.StartOutlook()
 }
 
 // GetMountedPSTs delegates to COMBridge to fetch mounted PSTs
