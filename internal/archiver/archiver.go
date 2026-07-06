@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-ole/go-ole"
 	"go.uber.org/zap"
 	"outlook-archiver/internal/config"
 	"outlook-archiver/internal/outlook"
