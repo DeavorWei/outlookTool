@@ -262,16 +262,9 @@ func (r *Reorganizer) processPSTFolder(ctx context.Context, folder outlook.Folde
 	}
 	defer comutil.SafeRelease(items)
 
-	// 仅筛选 IPM.Note 类型的邮件
-	filter := "[MessageClass] = 'IPM.Note'"
-	restrictedVar, err := comutil.SafeCallMethod(items, "Restrict", filter)
-	if err != nil {
-		return
-	}
-	restricted := restrictedVar.ToIDispatch()
-	if restricted == nil {
-		return
-	}
+	// 不再限制 IPM.Note 类型的邮件，获取所有类型对象
+	items.AddRef()
+	restricted := items
 	defer comutil.SafeRelease(restricted)
 
 
@@ -338,9 +331,20 @@ func (r *Reorganizer) processPSTFolder(ctx context.Context, folder outlook.Folde
 		if !needsMove {
 			itemRef.Release()
 			if progressCb != nil && i%50 == 0 {
-				progressCb(2, 0, res.TotalRectified+res.TotalMigrated, currentPSTName)
+				progressCb(2, res.TotalRectified+res.TotalMigrated, res.TotalRectified, currentPSTName)
 			}
 			continue
+		}
+
+		cutoffTime := CalcCutoffTime(0, r.cfg.RetainDays)
+		if !meta.time.Before(cutoffTime) {
+			r.logger.Warn("近期邮件被强制归档", 
+				zap.String("subject", meta.subject), 
+				zap.Time("mail_time", meta.time),
+				zap.String("source_pst", currentPSTName), 
+				zap.String("target_pst", targetPSTName),
+				zap.Int("retain_days", r.cfg.RetainDays),
+			)
 		}
 
 		if r.cfg.DryRun {
@@ -356,7 +360,7 @@ func (r *Reorganizer) processPSTFolder(ctx context.Context, folder outlook.Folde
 			}
 			itemRef.Release()
 			if progressCb != nil && i%10 == 0 {
-				progressCb(2, 0, res.TotalRectified+res.TotalMigrated, currentPSTName)
+				progressCb(2, res.TotalRectified+res.TotalMigrated, res.TotalRectified, currentPSTName)
 			}
 			time.Sleep(time.Duration(r.cfg.MoveIntervalMs) * time.Millisecond)
 			continue
@@ -391,8 +395,10 @@ func (r *Reorganizer) processPSTFolder(ctx context.Context, folder outlook.Folde
 		} else {
 			if forceMigrate {
 				res.TotalMigrated++
+				r.logger.Info("Migrated mail", zap.String("subject", meta.subject), zap.String("source_pst", currentPSTName), zap.String("target_pst", targetPSTName))
 			} else {
 				res.TotalRectified++
+				r.logger.Info("Rectified mail", zap.String("subject", meta.subject), zap.String("source_pst", currentPSTName), zap.String("target_pst", targetPSTName))
 			}
 		}
 
@@ -401,7 +407,7 @@ func (r *Reorganizer) processPSTFolder(ctx context.Context, folder outlook.Folde
 		itemRef.Release()
 
 		if progressCb != nil {
-			progressCb(2, 0, res.TotalRectified+res.TotalMigrated, currentPSTName)
+			progressCb(2, res.TotalRectified+res.TotalMigrated, res.TotalRectified, currentPSTName)
 		}
 
 		time.Sleep(time.Duration(r.cfg.MoveIntervalMs) * time.Millisecond)

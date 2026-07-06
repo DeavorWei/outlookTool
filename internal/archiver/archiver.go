@@ -128,10 +128,10 @@ func (a *Archiver) GetMountedPSTs() ([]string, error) {
 func BuildRestrictFilter(timeField string, cutoffTime time.Time) string {
 	// 格式化为 Outlook 可接受的时间字符串
 	timeStr := cutoffTime.Format("2006-01-02 15:04:05")
-	return fmt.Sprintf("[%s] < '%s' AND [MessageClass] = 'IPM.Note'", timeField, timeStr)
+	return fmt.Sprintf("[%s] < '%s'", timeField, timeStr)
 }
 
-func calcCutoffTime(safeDelay time.Duration, retainDays int) time.Time {
+func CalcCutoffTime(safeDelay time.Duration, retainDays int) time.Time {
 	now := time.Now()
 	cutoff := now.Add(-safeDelay)
 	if retainDays > 0 {
@@ -217,20 +217,27 @@ func (a *Archiver) processFolder(ctx context.Context, folder outlook.FolderInfo,
 
 	var filter string
 	if opts.SafeDelay == 0 && opts.RetainDays == 0 {
-		filter = "[MessageClass] = 'IPM.Note'"
+		filter = ""
 	} else {
-		cutoffTime := calcCutoffTime(opts.SafeDelay, opts.RetainDays)
+		cutoffTime := CalcCutoffTime(opts.SafeDelay, opts.RetainDays)
 		filter = BuildRestrictFilter(folder.TimeField, cutoffTime)
 	}
 
 	a.logger.Debug("Restrict filter", zap.String("folder", folder.FullPath), zap.String("filter", filter))
 
-	restrictedVar, err := comutil.SafeCallMethod(items, "Restrict", filter)
-	if err != nil {
-		a.logger.Error("Failed to restrict Items", zap.String("folder", folder.FullPath), zap.Error(err))
-		return moved, failed
+	var restricted *ole.IDispatch
+	if filter != "" {
+		restrictedVar, err := comutil.SafeCallMethod(items, "Restrict", filter)
+		if err != nil {
+			a.logger.Error("Failed to restrict Items", zap.String("folder", folder.FullPath), zap.Error(err))
+			return moved, failed
+		}
+		restricted = restrictedVar.ToIDispatch()
+	} else {
+		items.AddRef()
+		restricted = items
 	}
-	restricted := restrictedVar.ToIDispatch()
+	
 	if restricted == nil {
 		a.logger.Error("Restricted Items is nil", zap.String("folder", folder.FullPath))
 		return moved, failed
@@ -394,17 +401,24 @@ func (a *Archiver) countMatchedItems(folder outlook.FolderInfo, opts ArchiveOpti
 
 	var filter string
 	if opts.SafeDelay == 0 && opts.RetainDays == 0 {
-		filter = "[MessageClass] = 'IPM.Note'"
+		filter = ""
 	} else {
-		cutoffTime := calcCutoffTime(opts.SafeDelay, opts.RetainDays)
+		cutoffTime := CalcCutoffTime(opts.SafeDelay, opts.RetainDays)
 		filter = BuildRestrictFilter(folder.TimeField, cutoffTime)
 	}
 
-	restrictedVar, err := comutil.SafeCallMethod(items, "Restrict", filter)
-	if err != nil {
-		return 0
+	var restricted *ole.IDispatch
+	if filter != "" {
+		restrictedVar, err := comutil.SafeCallMethod(items, "Restrict", filter)
+		if err != nil {
+			return 0
+		}
+		restricted = restrictedVar.ToIDispatch()
+	} else {
+		items.AddRef()
+		restricted = items
 	}
-	restricted := restrictedVar.ToIDispatch()
+	
 	if restricted == nil {
 		return 0
 	}
