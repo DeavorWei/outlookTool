@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -347,7 +348,14 @@ func (a *Archiver) processFolder(ctx context.Context, folder outlook.FolderInfo,
 			continue
 		}
 
-		targetFolder, err := a.bridge.EnsurePSTFolder(pstRoot, folder.FullPath)
+		folderPath := folder.FullPath
+		isDeletedItems := false
+		if folderPath == "已删除邮件" || strings.EqualFold(folderPath, "deleted items") {
+			folderPath = "已删除邮件_备份"
+			isDeletedItems = true
+		}
+
+		targetFolder, err := a.bridge.EnsurePSTFolder(pstRoot, folderPath)
 		if err != nil {
 			a.logger.Error("Failed to ensure PST folder", zap.Error(err))
 			res.Errors = append(res.Errors, MailError{Subject: meta.subject, Err: err})
@@ -357,7 +365,21 @@ func (a *Archiver) processFolder(ctx context.Context, folder outlook.FolderInfo,
 			continue
 		}
 
-		if opts.CopyOnly {
+		if isDeletedItems {
+			err = a.bridge.CopyItem(itemRef.Dispatch(), targetFolder)
+			if err != nil {
+				a.logger.Error("Failed to copy deleted item", zap.String("subject", meta.subject), zap.Error(err))
+				res.Errors = append(res.Errors, MailError{Subject: meta.subject, Err: err})
+				failed++
+			} else {
+				err = a.bridge.DeleteItem(itemRef.Dispatch())
+				if err != nil {
+					a.logger.Error("Failed to delete source item after copy", zap.String("subject", meta.subject), zap.Error(err))
+				}
+				a.logger.Info("Moved deleted mail via copy+delete", zap.String("subject", meta.subject), zap.String("target_pst", quarter.PSTFileName()))
+				moved++
+			}
+		} else if opts.CopyOnly {
 			err = a.bridge.CopyItem(itemRef.Dispatch(), targetFolder)
 			if err != nil {
 				a.logger.Error("Failed to copy item", zap.String("subject", meta.subject), zap.Error(err))
