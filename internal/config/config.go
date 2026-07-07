@@ -25,7 +25,8 @@ type Config struct {
 	DebugLog           bool     `yaml:"debug_log" json:"debug_log"`
 	LegacyPSTScanPaths []string `yaml:"legacy_pst_scan_paths" json:"legacy_pst_scan_paths"`
 	IncludeMountedPSTs bool     `yaml:"include_mounted_psts" json:"include_mounted_psts"`
-	AutoStart          bool     `yaml:"-" json:"auto_start"` // Not saved in YAML, but synced via Web UI to Registry
+	StreamBlockSize    int      `yaml:"stream_block_size" json:"stream_block_size"` // 分块流式遍历的块大小，0=用默认值 1000
+	AutoStart          bool     `yaml:"-" json:"auto_start"`                       // Not saved in YAML, but synced via Web UI to Registry
 }
 
 func DefaultConfig() *Config {
@@ -51,6 +52,7 @@ func DefaultConfig() *Config {
 		DebugLog:           false,
 		LegacyPSTScanPaths: []string{},
 		IncludeMountedPSTs: true,
+		StreamBlockSize:    1000,
 	}
 }
 
@@ -126,6 +128,9 @@ func ValidateConfig(cfg *Config) error {
 	}
 	if cfg.MoveIntervalMs < 0 {
 		return errors.New("move_interval_ms must be >= 0")
+	}
+	if cfg.StreamBlockSize < 0 {
+		return errors.New("stream_block_size must be >= 0")
 	}
 
 	info, err := os.Stat(cfg.PSTRootPath)

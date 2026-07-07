@@ -222,10 +222,13 @@ func (a *Archiver) Archive(ctx context.Context, opts ArchiveOptions) (*ArchiveRe
 	return res, nil
 }
 
-type mailMeta struct {
+// compactMeta 分块流式遍历的紧凑快照项，仅保留处理所需的最小信息。
+// time 用 int64 时间戳压缩；分块方案下内存峰值由 blockSize 决定，
+// 与文件夹邮件总数解耦（原 mailMeta 全量快照已移除）。
+type compactMeta struct {
 	entryID string
 	subject string
-	time    time.Time
+	ts      int64
 }
 
 func (a *Archiver) processFolder(ctx context.Context, folder outlook.FolderInfo, opts ArchiveOptions, res *ArchiveResult) (int, int) {
@@ -241,36 +244,18 @@ func (a *Archiver) processFolder(ctx context.Context, folder outlook.FolderInfo,
 	defer cleanup()
 	res.TotalMatched += count
 
-	var metas []mailMeta
-	item, _ := a.bridge.GetFirst(restricted)
-	for item != nil {
-		if ctx.Err() != nil {
-			break
-		}
-
-		entryID, errID := a.bridge.GetEntryID(item)
-		if errID == nil && entryID != "" {
-			subject := a.bridge.GetSubject(item)
-			mailTime, errTime := a.bridge.GetMailTime(item, folder.TimeField)
-			if errTime == nil {
-				metas = append(metas, mailMeta{
-					entryID: entryID,
-					subject: subject,
-					time:    mailTime,
-				})
-			} else {
-				a.logger.Warn("Failed to get mail time in snapshot", zap.String("subject", subject), zap.Error(errTime))
-			}
-		} else {
-			a.logger.Warn("Failed to get EntryID in snapshot", zap.Error(errID))
-		}
-
-		nextItem, _ := a.bridge.GetNext(restricted)
-		comutil.SafeRelease(item)
-		item = nextItem
+	if count == 0 {
+		return moved, failed
 	}
-	if item != nil {
-		comutil.SafeRelease(item)
+
+	// M5：显式排序，保证倒序遍历语义正确（Items 默认顺序不保证按时间）
+	if err := a.bridge.SortItems(restricted, folder.TimeField, true); err != nil {
+		a.logger.Warn("排序集合失败，回退为索引顺序", zap.String("folder", folder.FullPath), zap.Error(err))
+	}
+
+	blockSize := cfg.StreamBlockSize
+	if blockSize <= 0 {
+		blockSize = 1000
 	}
 
 	pstCache := make(map[string]*ole.IDispatch)
@@ -280,96 +265,149 @@ func (a *Archiver) processFolder(ctx context.Context, folder outlook.FolderInfo,
 		}
 	}()
 
-	for i := len(metas) - 1; i >= 0; i-- {
-		meta := metas[i]
+	// M5：从末尾向头部分块倒序处理，内存峰值由 blockSize 决定（默认约 0.4MB），
+	// 与文件夹邮件总数解耦；MaxBatchSize 可在分块循环开头提前终止，无需全量扫描。
+	for end := count; end >= 1; end -= blockSize {
 		if ctx.Err() != nil {
-			res.TotalSkipped += (i + 1)
+			res.TotalSkipped += end
 			break
 		}
 		if opts.MaxBatchSize > 0 && res.TotalMoved+moved >= opts.MaxBatchSize {
-			res.TotalSkipped += (i + 1)
+			res.TotalSkipped += end
 			break
 		}
 
-		mailItem, err := a.bridge.GetItemFromID(meta.entryID)
-		if err != nil || mailItem == nil {
-			a.logger.Warn("Failed to get item by EntryID", zap.String("subject", meta.subject), zap.Error(err))
-			failed++
-			continue
+		start := end - blockSize + 1
+		if start < 1 {
+			start = 1
 		}
-		itemRef := comutil.NewCOMRef(mailItem, "mail_"+meta.entryID)
 
-		quarter := router.CalcQuarter(meta.time)
+		// 收集本块紧凑快照（正序索引遍历，仅 entryID + subject + 时间戳）
+		block := make([]compactMeta, 0, end-start+1)
+		for i := start; i <= end; i++ {
+			if ctx.Err() != nil {
+				break
+			}
+			item, err := a.bridge.GetItem(restricted, i)
+			if err != nil || item == nil {
+				continue
+			}
+			entryID, errID := a.bridge.GetEntryID(item)
+			if errID != nil || entryID == "" {
+				a.logger.Warn("Failed to get EntryID in snapshot", zap.Error(errID))
+				comutil.SafeRelease(item)
+				continue
+			}
+			subject := a.bridge.GetSubject(item)
+			mailTime, errTime := a.bridge.GetMailTime(item, folder.TimeField)
+			if errTime != nil {
+				a.logger.Warn("Failed to get mail time in snapshot", zap.String("subject", subject), zap.Error(errTime))
+				comutil.SafeRelease(item)
+				continue
+			}
+			comutil.SafeRelease(item)
+			block = append(block, compactMeta{
+				entryID: entryID,
+				subject: subject,
+				ts:      mailTime.Unix(),
+			})
+		}
 
-		if opts.DryRun {
-			action := "move"
+		// 块内倒序处理（保留 GetItemFromID 解耦 Move 的正确性设计：
+		// Move 会从源文件夹移除 item，若直接在被遍历的 restricted 集合上操作会破坏游标；
+		// GetItemFromID 拿到的 item 与 restricted 集合无引用关系，Move 后不影响后续索引访问。）
+		for j := len(block) - 1; j >= 0; j-- {
+			m := block[j]
+			if ctx.Err() != nil {
+				res.TotalSkipped += (j + 1)
+				break
+			}
+			if opts.MaxBatchSize > 0 && res.TotalMoved+moved >= opts.MaxBatchSize {
+				res.TotalSkipped += (j + 1)
+				break
+			}
+
+			mailItem, err := a.bridge.GetItemFromID(m.entryID)
+			if err != nil || mailItem == nil {
+				a.logger.Warn("Failed to get item by EntryID", zap.String("subject", m.subject), zap.Error(err))
+				failed++
+				continue
+			}
+			itemRef := comutil.NewCOMRef(mailItem, "mail_"+m.entryID)
+
+			mailTime := time.Unix(m.ts, 0)
+			quarter := router.CalcQuarter(mailTime)
+
+			if opts.DryRun {
+				action := "move"
+				if opts.CopyOnly {
+					action = "copy"
+				}
+				a.logger.Info("[DRY RUN] Would "+action+" mail",
+					zap.String("subject", m.subject),
+					zap.Time("mail_time", mailTime),
+					zap.String("source_folder", folder.FullPath),
+					zap.String("target_pst", quarter.PSTFileName()),
+				)
+				moved++
+				itemRef.Release()
+				time.Sleep(opts.MoveInterval)
+				continue
+			}
+
+			// Ensure PST is mounted and Folder exists
+			pstRoot, ok := pstCache[quarter.PSTFileName()]
+			if !ok {
+				pstRoot, err = a.bridge.EnsurePSTMounted(quarter, cfg.PSTRootPath)
+				if err != nil {
+					a.logger.Error("Failed to ensure PST mounted", zap.Error(err))
+					res.Errors = append(res.Errors, MailError{Subject: m.subject, Err: err})
+					itemRef.Release()
+					failed++
+					continue
+				}
+				pstCache[quarter.PSTFileName()] = pstRoot
+				a.checkPSTSize(quarter) // M12：挂载目标 PST 后检查大小并告警
+			}
+
+			folderPath := folder.FullPath
+			targetFolder, err := a.bridge.EnsurePSTFolder(pstRoot, folderPath)
+			if err != nil {
+				a.logger.Error("Failed to ensure PST folder", zap.Error(err))
+				res.Errors = append(res.Errors, MailError{Subject: m.subject, Err: err})
+				itemRef.Release()
+				failed++
+				continue
+			}
+
 			if opts.CopyOnly {
-				action = "copy"
+				err = a.bridge.CopyItem(itemRef.Dispatch(), targetFolder)
+				if err != nil {
+					a.logger.Error("Failed to copy item", zap.String("subject", m.subject), zap.Error(err))
+					res.Errors = append(res.Errors, MailError{Subject: m.subject, Err: err})
+					failed++
+				} else {
+					a.logger.Info("Copied mail", zap.String("subject", m.subject), zap.String("target_pst", quarter.PSTFileName()))
+					moved++
+				}
+			} else {
+				err = a.bridge.MoveItem(itemRef.Dispatch(), targetFolder)
+				if err != nil {
+					a.logger.Error("Failed to move item", zap.String("subject", m.subject), zap.Error(err))
+					res.Errors = append(res.Errors, MailError{Subject: m.subject, Err: err})
+					failed++
+				} else {
+					a.logger.Info("Moved mail", zap.String("subject", m.subject), zap.String("target_pst", quarter.PSTFileName()))
+					moved++
+				}
 			}
-			a.logger.Info("[DRY RUN] Would "+action+" mail",
-				zap.String("subject", meta.subject),
-				zap.Time("mail_time", meta.time),
-				zap.String("source_folder", folder.FullPath),
-				zap.String("target_pst", quarter.PSTFileName()),
-			)
-			moved++
+
+			comutil.SafeRelease(targetFolder)
+			// 不在这里 Release pstRoot，在 defer 中统一释放
 			itemRef.Release()
+
 			time.Sleep(opts.MoveInterval)
-			continue
 		}
-
-		// Ensure PST is mounted and Folder exists
-		pstRoot, ok := pstCache[quarter.PSTFileName()]
-		if !ok {
-		pstRoot, err = a.bridge.EnsurePSTMounted(quarter, cfg.PSTRootPath)
-		if err != nil {
-			a.logger.Error("Failed to ensure PST mounted", zap.Error(err))
-			res.Errors = append(res.Errors, MailError{Subject: meta.subject, Err: err})
-			itemRef.Release()
-			failed++
-			continue
-		}
-		pstCache[quarter.PSTFileName()] = pstRoot
-		a.checkPSTSize(quarter) // M12：挂载目标 PST 后检查大小并告警
-		}
-
-		folderPath := folder.FullPath
-		targetFolder, err := a.bridge.EnsurePSTFolder(pstRoot, folderPath)
-		if err != nil {
-			a.logger.Error("Failed to ensure PST folder", zap.Error(err))
-			res.Errors = append(res.Errors, MailError{Subject: meta.subject, Err: err})
-			itemRef.Release()
-			failed++
-			continue
-		}
-
-		if opts.CopyOnly {
-			err = a.bridge.CopyItem(itemRef.Dispatch(), targetFolder)
-			if err != nil {
-				a.logger.Error("Failed to copy item", zap.String("subject", meta.subject), zap.Error(err))
-				res.Errors = append(res.Errors, MailError{Subject: meta.subject, Err: err})
-				failed++
-			} else {
-				a.logger.Info("Copied mail", zap.String("subject", meta.subject), zap.String("target_pst", quarter.PSTFileName()))
-				moved++
-			}
-		} else {
-			err = a.bridge.MoveItem(itemRef.Dispatch(), targetFolder)
-			if err != nil {
-				a.logger.Error("Failed to move item", zap.String("subject", meta.subject), zap.Error(err))
-				res.Errors = append(res.Errors, MailError{Subject: meta.subject, Err: err})
-				failed++
-			} else {
-				a.logger.Info("Moved mail", zap.String("subject", meta.subject), zap.String("target_pst", quarter.PSTFileName()))
-				moved++
-			}
-		}
-
-		comutil.SafeRelease(targetFolder)
-		// 不在这里 Release pstRoot，在 defer 中统一释放
-		itemRef.Release()
-
-		time.Sleep(opts.MoveInterval)
 	}
 
 	return moved, failed

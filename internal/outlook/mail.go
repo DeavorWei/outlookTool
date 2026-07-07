@@ -207,10 +207,29 @@ func (b *COMBridge) GetItem(collection *ole.IDispatch, index int) (*ole.IDispatc
 			return err
 		}
 		defer itemVar.Clear()
-		item = itemVar.ToIDispatch()
+		// 必须在 Clear 生效前 AddRef：ToIDispatch() 仅提取指针，不增加引用计数；
+		// 而 defer itemVar.Clear() 通过 VariantClear 释放 VARIANT 持有的那次引用。
+		// 若不 AddRef，返回的 item 将是悬空指针，外部 SafeRelease 会触发 Double Free，
+		// 必然导致访问冲突崩溃。生命周期语义须与 GetFirst/GetNext/GetItemFromID 对齐。
+		if itemVar.Value() != nil {
+			item = itemVar.ToIDispatch()
+			if item != nil {
+				item.AddRef()
+			}
+		}
 		return nil
 	})
 	return item, err
+}
+
+// SortItems 对 Items 集合按指定属性排序，保证倒序遍历语义正确。
+// descending=true 表示降序（最新在前）；归档分块倒序处理前应调用。
+// Sort 是原地操作，仅影响被调用的 Items 视图（含 Restrict 派生集合），不影响原文件夹。
+func (b *COMBridge) SortItems(items *ole.IDispatch, property string, descending bool) error {
+	return b.Submit(func() error {
+		_, err := comutil.SafeCallMethod(items, "Sort", property, descending)
+		return err
+	})
 }
 
 // GetEntryID 获取对象的 EntryID

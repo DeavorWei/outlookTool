@@ -305,36 +305,23 @@ func (r *Reorganizer) processPSTFolder(ctx context.Context, folder outlook.Folde
 	restricted := items
 	defer comutil.SafeRelease(restricted)
 
-	var metas []mailMeta
-	item, _ := r.bridge.GetFirst(restricted)
-	for item != nil {
-		if ctx.Err() != nil {
-			break
-		}
-
-		entryID, errID := r.bridge.GetEntryID(item)
-		if errID == nil && entryID != "" {
-			subject := r.bridge.GetSubject(item)
-			mailTime, errTime := r.bridge.GetMailTime(item, folder.TimeField)
-			if errTime == nil {
-				metas = append(metas, mailMeta{
-					entryID: entryID,
-					subject: subject,
-					time:    mailTime,
-				})
-			} else {
-				r.logger.Warn("Failed to get mail time in snapshot", zap.String("subject", subject), zap.Error(errTime))
-			}
-		} else {
-			r.logger.Warn("Failed to get EntryID in snapshot", zap.Error(errID))
-		}
-
-		nextItem, _ := r.bridge.GetNext(restricted)
-		comutil.SafeRelease(item)
-		item = nextItem
+	count, err := r.bridge.GetCount(restricted)
+	if err != nil {
+		r.logger.Warn("Failed to get count", zap.String("folder", folder.FullPath), zap.Error(err))
+		return
 	}
-	if item != nil {
-		comutil.SafeRelease(item)
+	if count == 0 {
+		return
+	}
+
+	// M5：显式排序，保证倒序遍历语义正确
+	if err := r.bridge.SortItems(restricted, folder.TimeField, true); err != nil {
+		r.logger.Warn("排序集合失败，回退为索引顺序", zap.String("folder", folder.FullPath), zap.Error(err))
+	}
+
+	blockSize := cfg.StreamBlockSize
+	if blockSize <= 0 {
+		blockSize = 1000
 	}
 
 	pstCache := make(map[string]*ole.IDispatch)
@@ -344,120 +331,169 @@ func (r *Reorganizer) processPSTFolder(ctx context.Context, folder outlook.Folde
 		}
 	}()
 
-	for i := len(metas) - 1; i >= 0; i-- {
-		meta := metas[i]
+	processed := 0 // 跨块累积的已处理计数，用于进度回调频率控制
+
+	// M5：分块倒序处理，内存峰值由 blockSize 决定，与文件夹邮件总数解耦
+	for end := count; end >= 1; end -= blockSize {
 		if ctx.Err() != nil {
 			break
 		}
 
-		mailItem, err := r.bridge.GetItemFromID(meta.entryID)
-		if err != nil || mailItem == nil {
-			r.logger.Warn("Failed to get item by EntryID", zap.String("subject", meta.subject), zap.Error(err))
-			res.TotalFailed++
-			continue
+		start := end - blockSize + 1
+		if start < 1 {
+			start = 1
 		}
-		itemRef := comutil.NewCOMRef(mailItem, "mail_"+meta.entryID)
 
-		quarter := router.CalcQuarter(meta.time)
-		targetPSTName := quarter.PSTFileName()
-
-		// 判断是否需要移动
-		needsMove := false
-		if forceMigrate {
-			needsMove = true // 强制迁移
-		} else {
-			if !strings.EqualFold(currentPSTName, targetPSTName) {
-				needsMove = true // 本工具PST内时间纠偏
+		// 收集本块紧凑快照
+		block := make([]compactMeta, 0, end-start+1)
+		for i := start; i <= end; i++ {
+			if ctx.Err() != nil {
+				break
 			}
-		}
-
-		if !needsMove {
-			itemRef.Release()
-			if progressCb != nil && i%50 == 0 {
-				progressCb(2, res.TotalRectified+res.TotalMigrated, res.TotalRectified, currentPSTName)
+			item, err := r.bridge.GetItem(restricted, i)
+			if err != nil || item == nil {
+				continue
 			}
-			continue
+			entryID, errID := r.bridge.GetEntryID(item)
+			if errID != nil || entryID == "" {
+				comutil.SafeRelease(item)
+				continue
+			}
+			subject := r.bridge.GetSubject(item)
+			mailTime, errTime := r.bridge.GetMailTime(item, folder.TimeField)
+			if errTime != nil {
+				comutil.SafeRelease(item)
+				continue
+			}
+			comutil.SafeRelease(item)
+			block = append(block, compactMeta{
+				entryID: entryID,
+				subject: subject,
+				ts:      mailTime.Unix(),
+			})
 		}
 
-		cutoffTime := CalcCutoffTime(0, cfg.RetainDays)
-		if !meta.time.Before(cutoffTime) {
-			r.logger.Warn("近期邮件被强制归档",
-				zap.String("subject", meta.subject),
-				zap.Time("mail_time", meta.time),
-				zap.String("source_pst", currentPSTName),
-				zap.String("target_pst", targetPSTName),
-				zap.Int("retain_days", cfg.RetainDays),
-			)
-		}
+		// 块内倒序处理（保留 GetItemFromID 解耦 Move 的正确性设计：
+		// Move 会从源文件夹移除 item，若直接在被遍历的 restricted 集合上操作会破坏游标；
+		// GetItemFromID 拿到的 item 与 restricted 集合无引用关系，Move 后不影响后续索引访问。）
+		for j := len(block) - 1; j >= 0; j-- {
+			m := block[j]
+			if ctx.Err() != nil {
+				break
+			}
 
-		if cfg.DryRun {
-			r.logger.Info("[DRY RUN] 会进行纠偏/迁移",
-				zap.String("subject", meta.subject),
-				zap.String("source_pst", currentPSTName),
-				zap.String("target_pst", targetPSTName),
-			)
+			mailItem, err := r.bridge.GetItemFromID(m.entryID)
+			if err != nil || mailItem == nil {
+				r.logger.Warn("Failed to get item by EntryID", zap.String("subject", m.subject), zap.Error(err))
+				res.TotalFailed++
+				continue
+			}
+			itemRef := comutil.NewCOMRef(mailItem, "mail_"+m.entryID)
+
+			mailTime := time.Unix(m.ts, 0)
+			quarter := router.CalcQuarter(mailTime)
+			targetPSTName := quarter.PSTFileName()
+
+			// 判断是否需要移动
+			needsMove := false
 			if forceMigrate {
-				res.TotalMigrated++
+				needsMove = true // 强制迁移
 			} else {
-				res.TotalRectified++
+				if !strings.EqualFold(currentPSTName, targetPSTName) {
+					needsMove = true // 本工具PST内时间纠偏
+				}
 			}
-			itemRef.Release()
-			if progressCb != nil && i%10 == 0 {
-				progressCb(2, res.TotalRectified+res.TotalMigrated, res.TotalRectified, currentPSTName)
-			}
-			time.Sleep(time.Duration(cfg.MoveIntervalMs) * time.Millisecond)
-			continue
-		}
 
-		// 执行移动
-		targetPSTRoot, ok := pstCache[targetPSTName]
-		if !ok {
-			targetPSTRoot, err = r.bridge.EnsurePSTMounted(quarter, cfg.PSTRootPath)
+			processed++
+
+			if !needsMove {
+				itemRef.Release()
+				if progressCb != nil && processed%50 == 0 {
+					progressCb(2, res.TotalRectified+res.TotalMigrated, res.TotalRectified, currentPSTName)
+				}
+				continue
+			}
+
+			cutoffTime := CalcCutoffTime(0, cfg.RetainDays)
+			if !mailTime.Before(cutoffTime) {
+				r.logger.Warn("近期邮件被强制归档",
+					zap.String("subject", m.subject),
+					zap.Time("mail_time", mailTime),
+					zap.String("source_pst", currentPSTName),
+					zap.String("target_pst", targetPSTName),
+					zap.Int("retain_days", cfg.RetainDays),
+				)
+			}
+
+			if cfg.DryRun {
+				r.logger.Info("[DRY RUN] 会进行纠偏/迁移",
+					zap.String("subject", m.subject),
+					zap.String("source_pst", currentPSTName),
+					zap.String("target_pst", targetPSTName),
+				)
+				if forceMigrate {
+					res.TotalMigrated++
+				} else {
+					res.TotalRectified++
+				}
+				itemRef.Release()
+				if progressCb != nil && processed%10 == 0 {
+					progressCb(2, res.TotalRectified+res.TotalMigrated, res.TotalRectified, currentPSTName)
+				}
+				time.Sleep(time.Duration(cfg.MoveIntervalMs) * time.Millisecond)
+				continue
+			}
+
+			// 执行移动
+			targetPSTRoot, ok := pstCache[targetPSTName]
+			if !ok {
+				targetPSTRoot, err = r.bridge.EnsurePSTMounted(quarter, cfg.PSTRootPath)
+				if err != nil {
+					r.logger.Error("挂载目标 PST 失败", zap.Error(err))
+					itemRef.Release()
+					res.TotalFailed++
+					continue
+				}
+				pstCache[targetPSTName] = targetPSTRoot
+				r.checkPSTSize(quarter) // M12：挂载目标 PST 后检查大小并告警
+			}
+
+			targetFolder, err := r.bridge.EnsurePSTFolder(targetPSTRoot, folder.FullPath)
 			if err != nil {
-				r.logger.Error("挂载目标 PST 失败", zap.Error(err))
+				r.logger.Error("创建目标 PST 文件夹失败", zap.Error(err))
+				// 注意：targetPSTRoot 已存入 pstCache，由 defer 统一释放，此处不可释放（否则 defer double-free）
 				itemRef.Release()
 				res.TotalFailed++
 				continue
 			}
-		pstCache[targetPSTName] = targetPSTRoot
-		r.checkPSTSize(quarter) // M12：挂载目标 PST 后检查大小并告警
-	}
 
-		targetFolder, err := r.bridge.EnsurePSTFolder(targetPSTRoot, folder.FullPath)
-		if err != nil {
-			r.logger.Error("创建目标 PST 文件夹失败", zap.Error(err))
-			comutil.SafeRelease(targetPSTRoot)
-			itemRef.Release()
-			res.TotalFailed++
-			continue
-		}
-
-		if cfg.CopyOnly {
-			err = r.bridge.CopyItem(itemRef.Dispatch(), targetFolder)
-		} else {
-			err = r.bridge.MoveItem(itemRef.Dispatch(), targetFolder)
-		}
-		if err != nil {
-			r.logger.Error("移动/复制失败", zap.Error(err))
-			res.TotalFailed++
-		} else {
-			if forceMigrate {
-				res.TotalMigrated++
-				r.logger.Info("Migrated mail", zap.String("subject", meta.subject), zap.String("source_pst", currentPSTName), zap.String("target_pst", targetPSTName))
+			if cfg.CopyOnly {
+				err = r.bridge.CopyItem(itemRef.Dispatch(), targetFolder)
 			} else {
-				res.TotalRectified++
-				r.logger.Info("Rectified mail", zap.String("subject", meta.subject), zap.String("source_pst", currentPSTName), zap.String("target_pst", targetPSTName))
+				err = r.bridge.MoveItem(itemRef.Dispatch(), targetFolder)
 			}
+			if err != nil {
+				r.logger.Error("移动/复制失败", zap.Error(err))
+				res.TotalFailed++
+			} else {
+				if forceMigrate {
+					res.TotalMigrated++
+					r.logger.Info("Migrated mail", zap.String("subject", m.subject), zap.String("source_pst", currentPSTName), zap.String("target_pst", targetPSTName))
+				} else {
+					res.TotalRectified++
+					r.logger.Info("Rectified mail", zap.String("subject", m.subject), zap.String("source_pst", currentPSTName), zap.String("target_pst", targetPSTName))
+				}
+			}
+
+			comutil.SafeRelease(targetFolder)
+			// targetPSTRoot 在 defer 中统一释放
+			itemRef.Release()
+
+			if progressCb != nil {
+				progressCb(2, res.TotalRectified+res.TotalMigrated, res.TotalRectified, currentPSTName)
+			}
+
+			time.Sleep(time.Duration(cfg.MoveIntervalMs) * time.Millisecond)
 		}
-
-		comutil.SafeRelease(targetFolder)
-		// targetPSTRoot 在 defer 中统一释放
-		itemRef.Release()
-
-		if progressCb != nil {
-			progressCb(2, res.TotalRectified+res.TotalMigrated, res.TotalRectified, currentPSTName)
-		}
-
-		time.Sleep(time.Duration(cfg.MoveIntervalMs) * time.Millisecond)
 	}
 }
