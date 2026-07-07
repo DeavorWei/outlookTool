@@ -17,7 +17,7 @@ func (b *COMBridge) getNamespace() (*ole.IDispatch, error) {
 		return nil, err
 	}
 	defer comutil.SafeRelease(app)
-	
+
 	nsVar, err := comutil.SafeCallMethod(app, "GetNamespace", "MAPI")
 	if err != nil {
 		return nil, err
@@ -59,7 +59,7 @@ func (b *COMBridge) EnsurePSTMountedByPath(expectedPath string) (*ole.IDispatch,
 		defer storesVar.Clear()
 		stores := storesVar.ToIDispatch()
 		defer comutil.SafeRelease(stores)
-		
+
 		countVar, err := comutil.SafeGetProperty(stores, "Count")
 		if err != nil {
 			return err
@@ -97,7 +97,7 @@ func (b *COMBridge) EnsurePSTMountedByPath(expectedPath string) (*ole.IDispatch,
 					return fmt.Errorf("failed to mount PST %s: %w", expectedPath, err)
 				}
 			}
-			
+
 			// 重新查找刚挂载的 store
 			countVar, _ = comutil.SafeGetProperty(stores, "Count")
 			count = int(countVar.Val)
@@ -121,12 +121,12 @@ func (b *COMBridge) EnsurePSTMountedByPath(expectedPath string) (*ole.IDispatch,
 				storeVar.Clear()
 			}
 		}
-		
+
 		if targetStore == nil {
 			return fmt.Errorf("store mounted but not found in Stores collection: %s", expectedPath)
 		}
 		defer comutil.SafeRelease(targetStore)
-		
+
 		// 返回根文件夹
 		rootFolderVar, err := comutil.SafeCallMethod(targetStore, "GetRootFolder")
 		if err != nil {
@@ -151,19 +151,19 @@ func (b *COMBridge) EnsurePSTFolder(pstRoot *ole.IDispatch, folderPath string) (
 		parts := strings.Split(strings.ReplaceAll(folderPath, "\\", "/"), "/")
 		currentFolder := pstRoot
 		currentFolder.AddRef()
-		
+
 		for _, part := range parts {
 			if part == "" {
 				continue
 			}
-			
+
 			foldersVar, err := comutil.SafeGetProperty(currentFolder, "Folders")
 			if err != nil {
 				comutil.SafeRelease(currentFolder)
 				return fmt.Errorf("failed to get Folders: %w", err)
 			}
 			folders := foldersVar.ToIDispatch()
-			
+
 			var nextFolder *ole.IDispatch
 			// 尝试通过名称获取
 			folderVar, err := comutil.SafeCallMethod(folders, "Item", part)
@@ -183,12 +183,12 @@ func (b *COMBridge) EnsurePSTFolder(pstRoot *ole.IDispatch, folderPath string) (
 				nextFolder.AddRef()
 				newFolderVar.Clear()
 			}
-			
+
 			foldersVar.Clear()
 			comutil.SafeRelease(currentFolder)
 			currentFolder = nextFolder
 		}
-		
+
 		resultFolder = currentFolder
 		return nil
 	})
@@ -197,49 +197,16 @@ func (b *COMBridge) EnsurePSTFolder(pstRoot *ole.IDispatch, folderPath string) (
 
 // IsStoreMounted 通过物理路径判断 Store 是否已挂载
 func (b *COMBridge) IsStoreMounted(filePath string) (bool, error) {
-	var mounted bool
-	err := b.Submit(func() error {
-		ns, err := b.getNamespace()
-		if err != nil {
-			return err
+	psts, err := b.GetMountedPSTs()
+	if err != nil {
+		return false, err
+	}
+	for _, p := range psts {
+		if strings.EqualFold(p, filePath) {
+			return true, nil
 		}
-		defer comutil.SafeRelease(ns)
-
-		storesVar, err := comutil.SafeGetProperty(ns, "Stores")
-		if err != nil {
-			return err
-		}
-		defer storesVar.Clear()
-		stores := storesVar.ToIDispatch()
-		defer comutil.SafeRelease(stores)
-		
-		countVar, err := comutil.SafeGetProperty(stores, "Count")
-		if err != nil {
-			return err
-		}
-		count := int(countVar.Val)
-
-		for i := 1; i <= count; i++ {
-			storeVar, err := comutil.SafeCallMethod(stores, "Item", i)
-			if err != nil {
-				continue
-			}
-			store := storeVar.ToIDispatch()
-			pathVar, err := comutil.SafeGetProperty(store, "FilePath")
-			if err == nil && pathVar.Value() != nil {
-				path := pathVar.ToString()
-				pathVar.Clear()
-				if strings.EqualFold(path, filePath) {
-					storeVar.Clear()
-					mounted = true
-					return nil
-				}
-			}
-			storeVar.Clear()
-		}
-		return nil
-	})
-	return mounted, err
+	}
+	return false, nil
 }
 
 // GetMountedPSTs 返回当前已挂载的所有 PST 文件路径

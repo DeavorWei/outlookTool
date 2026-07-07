@@ -24,10 +24,12 @@ import (
 var webFS embed.FS
 
 type WebServer struct {
-	logger        *zap.Logger
-	sched         *scheduler.Scheduler
-	cfgPath       string
-	onShutdown    func()
+	logger     *zap.Logger
+	sched      *scheduler.Scheduler
+	cfgPath    string
+	onShutdown func() // Web 服务停止时回调（仅取消菜单勾选）
+	onAppQuit  func() // 用户请求退出整个程序时回调（触发托盘退出）
+	ctx        context.Context
 
 	mu            sync.Mutex
 	srv           *http.Server
@@ -37,12 +39,14 @@ type WebServer struct {
 	shutdownCh    chan struct{}
 }
 
-func NewWebServer(logger *zap.Logger, sched *scheduler.Scheduler, cfgPath string, onShutdown func()) *WebServer {
+func NewWebServer(ctx context.Context, logger *zap.Logger, sched *scheduler.Scheduler, cfgPath string, onShutdown func(), onAppQuit func()) *WebServer {
 	return &WebServer{
 		logger:     logger,
 		sched:      sched,
 		cfgPath:    cfgPath,
 		onShutdown: onShutdown,
+		onAppQuit:  onAppQuit,
+		ctx:        ctx,
 	}
 }
 
@@ -58,13 +62,13 @@ func (ws *WebServer) Start() (int, error) {
 	ws.shutdownCh = make(chan struct{})
 
 	mux := http.NewServeMux()
-	
+
 	// API routes
 	mux.HandleFunc("/api/config", ws.handleConfig)
 	mux.HandleFunc("/api/heartbeat", ws.handleHeartbeat)
 	mux.HandleFunc("/api/mounted-psts", ws.handleMountedPSTs)
 	mux.HandleFunc("/api/actions/restore", ws.handleRestore)
-	
+
 	mux.HandleFunc("/api/logs/stream", ws.handleLogStream)
 	mux.HandleFunc("/api/actions/trigger", ws.handleActionTrigger)
 	mux.HandleFunc("/api/actions/reorganize", ws.handleActionReorganize)
@@ -72,7 +76,7 @@ func (ws *WebServer) Start() (int, error) {
 	mux.HandleFunc("/api/actions/open-dir", ws.handleActionOpenDir)
 	mux.HandleFunc("/api/actions/autostart", ws.handleActionAutostart)
 	mux.HandleFunc("/api/actions/quit", ws.handleActionQuit)
-	
+
 	// Static files
 	webSubFS, err := fs.Sub(webFS, "web")
 	if err != nil {
@@ -97,7 +101,10 @@ func (ws *WebServer) Start() (int, error) {
 	}
 
 	ws.port = port
-	ws.srv = &http.Server{Handler: mux}
+	ws.srv = &http.Server{
+		Handler:     mux,
+		BaseContext: func(_ net.Listener) context.Context { return ws.ctx },
+	}
 	ws.isRunning = true
 
 	go func() {
@@ -123,12 +130,12 @@ func (ws *WebServer) Stop() {
 	srv := ws.srv
 	ws.mu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if srv != nil {
 		srv.Shutdown(ctx)
 	}
-	
+
 	if ws.onShutdown != nil {
 		ws.onShutdown()
 	}
@@ -191,6 +198,7 @@ func (ws *WebServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Validate in memory first
 		if err := config.ValidateConfig(&newCfg); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -201,15 +209,21 @@ func (ws *WebServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 			ws.logger.Error("Failed to update autostart setting", zap.Error(err))
 		}
 
-		// Save to disk
-		if err := config.SaveConfig(ws.cfgPath, &newCfg); err != nil {
+		// Use atomic write to file (simple approach: write temp, then rename)
+		tmpPath := ws.cfgPath + ".tmp"
+		if err := config.SaveConfig(tmpPath, &newCfg); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := os.Rename(tmpPath, ws.cfgPath); err != nil {
+			os.Remove(tmpPath)
+			http.Error(w, "Failed to update config file atomically: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 
 		// Reload configuration into scheduler
 		if err := ws.sched.ReloadConfig(ws.cfgPath); err != nil {
-			http.Error(w, "已保存到文件，但热加载失败 (程序正在归档中，请稍后手动重载或重启): "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, "已保存到文件，但热加载失败 (程序可能正在归档中，请稍后手动重载或重启): "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 
@@ -259,7 +273,7 @@ func (ws *WebServer) handleRestore(w http.ResponseWriter, r *http.Request) {
 
 	// Trigger restore asynchronously to avoid blocking the HTTP response
 	go func() {
-		_ = ws.sched.TriggerRestore(context.Background(), req)
+		_ = ws.sched.TriggerRestore(ws.ctx, req)
 	}()
 
 	w.WriteHeader(http.StatusOK)
@@ -275,15 +289,21 @@ func (ws *WebServer) IsRunning() bool {
 // Actions
 
 func (ws *WebServer) handleActionTrigger(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost { http.Error(w, "Method not allowed", http.StatusMethodNotAllowed); return }
-	go ws.sched.TriggerOnce(context.Background())
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	go ws.sched.TriggerOnce(ws.ctx)
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"success"}`))
 }
 
 func (ws *WebServer) handleActionReorganize(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost { http.Error(w, "Method not allowed", http.StatusMethodNotAllowed); return }
-	go ws.sched.TriggerReorganize(context.Background(), func(info scheduler.ProgressInfo) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	go ws.sched.TriggerReorganize(ws.ctx, func(info scheduler.ProgressInfo) {
 		ws.logger.Info("全量整理进度", zap.Int("phase", info.Phase), zap.Int("processed", info.Processed))
 	})
 	w.WriteHeader(http.StatusOK)
@@ -291,7 +311,10 @@ func (ws *WebServer) handleActionReorganize(w http.ResponseWriter, r *http.Reque
 }
 
 func (ws *WebServer) handleActionReload(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost { http.Error(w, "Method not allowed", http.StatusMethodNotAllowed); return }
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	err := ws.sched.ReloadConfig(ws.cfgPath)
 	if err != nil {
 		ws.logger.Error("重新加载配置失败", zap.Error(err))
@@ -304,7 +327,10 @@ func (ws *WebServer) handleActionReload(w http.ResponseWriter, r *http.Request) 
 }
 
 func (ws *WebServer) handleActionOpenDir(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost { http.Error(w, "Method not allowed", http.StatusMethodNotAllowed); return }
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	target := r.URL.Query().Get("target")
 	if target == "log" {
 		if logger.CurrentLogDir != "" {
@@ -312,14 +338,22 @@ func (ws *WebServer) handleActionOpenDir(w http.ResponseWriter, r *http.Request)
 		}
 	} else if target == "config" {
 		exec.Command("cmd", "/c", "start", "", ws.cfgPath).Start()
+	} else {
+		http.Error(w, "Invalid target", http.StatusBadRequest)
+		return
 	}
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"success"}`))
 }
 
 func (ws *WebServer) handleActionAutostart(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost { http.Error(w, "Method not allowed", http.StatusMethodNotAllowed); return }
-	var req struct { Enabled bool `json:"enabled"` }
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -339,7 +373,10 @@ func (ws *WebServer) handleActionAutostart(w http.ResponseWriter, r *http.Reques
 }
 
 func (ws *WebServer) handleActionQuit(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost { http.Error(w, "Method not allowed", http.StatusMethodNotAllowed); return }
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	if ws.sched.GetState() == scheduler.StateReorganizing {
 		http.Error(w, "全量整理中，禁止退出", http.StatusConflict)
 		return
@@ -347,9 +384,10 @@ func (ws *WebServer) handleActionQuit(w http.ResponseWriter, r *http.Request) {
 	ws.logger.Info("用户通过控制台触发退出程序")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"success"}`))
-	
+
 	go func() {
-		time.Sleep(500 * time.Millisecond)
-		os.Exit(0)
+		if ws.onAppQuit != nil {
+			ws.onAppQuit()
+		}
 	}()
 }

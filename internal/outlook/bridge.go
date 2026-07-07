@@ -3,6 +3,7 @@ package outlook
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -11,38 +12,78 @@ import (
 
 	"github.com/go-ole/go-ole"
 	"github.com/go-ole/go-ole/oleutil"
+	"go.uber.org/zap"
 	"golang.org/x/sys/windows"
 )
 
+type comTask struct {
+	fn    func() error
+	errCh chan error
+}
+
 // COMBridge 封装 COM 操作的桥接层
 type COMBridge struct {
-	taskCh   chan func() // 所有 COM 操作通过此 channel 提交
-	resultCh chan error
+	taskCh   chan comTask // 所有 COM 操作通过此 channel 提交
 	threadID uint32
+	logger   *zap.Logger
 }
 
 // NewCOMBridge 创建一个新的 COMBridge
-func NewCOMBridge() *COMBridge {
+func NewCOMBridge(logger *zap.Logger) *COMBridge {
 	return &COMBridge{
-		taskCh:   make(chan func(), 64),
-		resultCh: make(chan error),
+		taskCh: make(chan comTask, 64),
+		logger: logger,
 	}
 }
 
 // Run 启动 COM 工作线程（必须在独立 goroutine 中调用）
-func (b *COMBridge) Run(ctx context.Context) {
+func (b *COMBridge) Run(ctx context.Context, ready chan<- struct{}) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	
+
 	atomic.StoreUint32(&b.threadID, windows.GetCurrentThreadId())
 
 	ole.CoInitializeEx(0, ole.COINIT_APARTMENTTHREADED)
 	defer ole.CoUninitialize()
 
+	close(ready)
+
+	defer func() {
+		// 排空 taskCh，让等待的 Submit 收到错误
+		for {
+			select {
+			case task := <-b.taskCh:
+				if task.errCh != nil {
+					task.errCh <- fmt.Errorf("COM bridge is shutting down")
+				}
+			default:
+				return
+			}
+		}
+	}()
+
 	for {
 		select {
 		case task := <-b.taskCh:
-			task() // 在锁定的 OS 线程上执行
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						err := fmt.Errorf("COM 任务 panic: %v", r)
+						// 同时写入应用日志便于排查（stderr 保留为兜底）
+						if b.logger != nil {
+							b.logger.Error("COM 任务出现 panic", zap.Any("panic", r), zap.Stack("stack"))
+						}
+						fmt.Fprintf(os.Stderr, "%s\n", err)
+						if task.errCh != nil {
+							task.errCh <- err
+						}
+					}
+				}()
+				err := task.fn() // 在锁定的 OS 线程上执行
+				if task.errCh != nil {
+					task.errCh <- err
+				}
+			}()
 		case <-ctx.Done():
 			return
 		}
@@ -51,16 +92,33 @@ func (b *COMBridge) Run(ctx context.Context) {
 
 // Submit 向 COM 线程提交操作并等待结果
 func (b *COMBridge) Submit(fn func() error) error {
+	return b.SubmitWithContext(context.Background(), fn)
+}
+
+// SubmitWithContext 向 COM 线程提交操作并支持上下文取消
+func (b *COMBridge) SubmitWithContext(ctx context.Context, fn func() error) error {
 	if tid := atomic.LoadUint32(&b.threadID); tid != 0 && windows.GetCurrentThreadId() == tid {
 		return fn()
 	}
 
-	// 使用局部 channel 接收结果，保证并发安全
 	errCh := make(chan error, 1)
-	b.taskCh <- func() {
-		errCh <- fn()
+	task := comTask{
+		fn:    fn,
+		errCh: errCh,
 	}
-	return <-errCh
+
+	select {
+	case b.taskCh <- task:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // IsOutlookRunning 通过 Windows API 扫描进程列表
@@ -142,4 +200,3 @@ func StartOutlook() error {
 	cmd := exec.Command("cmd", "/c", "start", "outlook")
 	return cmd.Start()
 }
-

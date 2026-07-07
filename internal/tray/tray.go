@@ -10,10 +10,10 @@ import (
 
 	"github.com/getlantern/systray"
 
+	"go.uber.org/zap"
 	"outlook-archiver/internal/config"
 	"outlook-archiver/internal/logger"
 	"outlook-archiver/internal/monitor"
-	"go.uber.org/zap"
 	"outlook-archiver/internal/registry"
 	"outlook-archiver/internal/scheduler"
 	"outlook-archiver/internal/server"
@@ -62,8 +62,10 @@ func onReady(sched *scheduler.Scheduler, cfg *config.Config, zlog *zap.Logger, i
 
 	exeDir, _ := os.Executable()
 	configPath := filepath.Join(filepath.Dir(exeDir), "config.yaml")
-	ws := server.NewWebServer(zlog, sched, configPath, func() {
-		mWebConfig.Uncheck()
+	var ws *server.WebServer
+	ws = server.NewWebServer(trayCtx, zlog, sched, configPath, mWebConfig.Uncheck, func() {
+		ws.Stop()      // 优雅关闭 Web 服务并取消菜单勾选
+		systray.Quit() // 走与托盘退出一致的优雅清理路径
 	})
 
 	if isFirstRun {
@@ -87,7 +89,7 @@ func onReady(sched *scheduler.Scheduler, cfg *config.Config, zlog *zap.Logger, i
 
 	// 启动 goroutine 定期监控 scheduler 状态以更新 UI (图标及菜单禁用状态)
 	go func() {
-		ticker := time.NewTicker(1 * time.Second)
+		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
@@ -97,7 +99,7 @@ func onReady(sched *scheduler.Scheduler, cfg *config.Config, zlog *zap.Logger, i
 				if sched == nil {
 					continue
 				}
-				
+
 				// Sync AutoStart state from registry
 				isAutoEnabled := registry.IsAutoStartEnabled()
 				if isAutoEnabled && !mAutoStart.Checked() {
@@ -110,7 +112,7 @@ func onReady(sched *scheduler.Scheduler, cfg *config.Config, zlog *zap.Logger, i
 				safeCfg := sched.GetConfigCopy()
 				diskStatus, _ := monitor.CheckDiskSpace(safeCfg.PSTRootPath)
 				switch state {
-				case scheduler.StateIdle, scheduler.StatePaused:
+				case scheduler.StateIdle:
 					if diskStatus == monitor.DiskCritical {
 						systray.SetIcon(errorIcon)
 						systray.SetTooltip("Outlook Auto-Archiver - 磁盘空间不足")

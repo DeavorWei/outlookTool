@@ -47,7 +47,7 @@ func (ws *WebServer) handleLogStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	hub := GetLogHub()
-	
+
 	clientChan := make(chan string, 100)
 	hub.mu.Lock()
 	hub.clients[clientChan] = true

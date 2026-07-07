@@ -98,7 +98,7 @@ func (b *COMBridge) walkFoldersRecursive(currentFolder *ole.IDispatch, currentPa
 		folder := folderVar.ToIDispatch()
 		folder.AddRef()
 		folderVar.Clear()
-		
+
 		nameVar, err := comutil.SafeGetProperty(folder, "Name")
 		if err != nil {
 			comutil.SafeRelease(folder)
@@ -172,7 +172,7 @@ func (b *COMBridge) isSystemReserved(folder *ole.IDispatch, name, fullPath strin
 	if strings.HasPrefix(fullPath, "同步问题") || strings.HasPrefix(fullPath, "Sync Issues") {
 		return true
 	}
-	
+
 	// DefaultItemType: 0 = MailItem. 排除非邮件文件夹
 	itemTypeVar, err := comutil.SafeGetProperty(folder, "DefaultItemType")
 	if err == nil {
@@ -182,7 +182,7 @@ func (b *COMBridge) isSystemReserved(folder *ole.IDispatch, name, fullPath strin
 			return true
 		}
 	}
-	
+
 	lowerName := strings.ToLower(name)
 	// 根据要求排除的内置保留文件夹名称
 	reservedNames := []string{
@@ -197,7 +197,7 @@ func (b *COMBridge) isSystemReserved(folder *ole.IDispatch, name, fullPath strin
 			return true
 		}
 	}
-	
+
 	return false
 }
 

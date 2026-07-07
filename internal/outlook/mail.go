@@ -113,18 +113,21 @@ func (b *COMBridge) GetMailTime(mailItem *ole.IDispatch, timeField string) (time
 			}
 		}
 		defer timeVar.Clear()
-		t, err = parseTime(timeVar.Value())
+		t, err = ParseTime(timeVar.Value())
 		return err
 	})
 	return t, err
 }
 
-// parseTime 尝试将 COM 返回的类型转换为 time.Time
-func parseTime(val interface{}) (time.Time, error) {
+// ParseTime 尝试将 COM 返回的类型转换为 time.Time
+func ParseTime(val interface{}) (time.Time, error) {
 	switch v := val.(type) {
 	case time.Time:
 		return v, nil
 	case float64: // OLE Automation Date
+		if v < 0 || v > 2958465 { // OLE Date 的合理范围
+			return time.Time{}, fmt.Errorf("OLE date out of bounds: %f", v)
+		}
 		days := int(v)
 		fraction := v - float64(days)
 		t := time.Date(1899, 12, 30, 0, 0, 0, 0, time.UTC).AddDate(0, 0, days)

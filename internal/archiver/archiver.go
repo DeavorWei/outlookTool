@@ -4,13 +4,13 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/go-ole/go-ole"
 	"go.uber.org/zap"
 	"outlook-archiver/internal/config"
+	"outlook-archiver/internal/monitor"
 	"outlook-archiver/internal/outlook"
 	"outlook-archiver/internal/router"
 	"outlook-archiver/pkg/comutil"
@@ -36,24 +36,48 @@ type ArchiveOptions struct {
 	SafeDelay    time.Duration // 0 = 不延迟（全量整理模式）
 	RetainDays   int           // 0 = 不保留最近的邮件，全部归档
 	MoveInterval time.Duration
-	DryRun       bool          // true = 仅日志，不执行 Move
-	CopyOnly     bool          // true = 仅复制，不执行 Move
+	DryRun       bool // true = 仅日志，不执行 Move
+	CopyOnly     bool // true = 仅复制，不执行 Move
 }
 
 type Archiver struct {
-	cfg    *config.Config
-	bridge *outlook.COMBridge
-	logger *zap.Logger
+	cfgProvider func() config.Config // 实时获取当前生效配置（支持热重载）
+	bridge      *outlook.COMBridge
+	logger      *zap.Logger
 
 	pendingMu      sync.Mutex
 	pendingDeletes []string // 待删除的 PST 文件路径
 }
 
-func NewArchiver(cfg *config.Config, bridge *outlook.COMBridge, logger *zap.Logger) *Archiver {
+// getCfg 返回当前生效配置的最新副本（非启动时快照），保证热重载后归档逻辑使用新配置
+func (a *Archiver) getCfg() config.Config {
+	if a.cfgProvider == nil {
+		return config.Config{}
+	}
+	return a.cfgProvider()
+}
+
+// checkPSTSize 检查目标 PST 文件大小，接近/超过阈值时输出告警日志（需求 §5.3）
+func (a *Archiver) checkPSTSize(quarter router.QuarterInfo) {
+	path := quarter.PSTFilePath(a.getCfg().PSTRootPath)
+	status, err := monitor.CheckPSTSize(path)
+	if err != nil {
+		a.logger.Warn("检查 PST 大小失败", zap.String("path", path), zap.Error(err))
+		return
+	}
+	switch status {
+	case monitor.PSTSizeWarning:
+		a.logger.Warn("单 PST 文件接近 20GB 上限，建议尽快拆分或迁移", zap.String("path", path), zap.Int64("size_gb_threshold", 15))
+	case monitor.PSTSizeCritical:
+		a.logger.Error("单 PST 文件超过 20GB，存在损坏风险，请立即拆分或迁移", zap.String("path", path), zap.Int64("size_gb_threshold", 20))
+	}
+}
+
+func NewArchiver(cfgProvider func() config.Config, bridge *outlook.COMBridge, logger *zap.Logger) *Archiver {
 	return &Archiver{
-		cfg:    cfg,
-		bridge: bridge,
-		logger: logger,
+		cfgProvider: cfgProvider,
+		bridge:      bridge,
+		logger:      logger,
 	}
 }
 
@@ -88,7 +112,7 @@ func (a *Archiver) ExecuteIndependentDeletion() {
 
 	// 1. 尝试优雅关闭
 	a.bridge.QuitOutlook()
-	
+
 	// 等待并检测是否真的关闭
 	closed := false
 	for i := 0; i < 5; i++ {
@@ -98,7 +122,7 @@ func (a *Archiver) ExecuteIndependentDeletion() {
 			break
 		}
 	}
-	
+
 	// 2. 强制杀进程
 	if !closed {
 		a.logger.Warn("优雅退出 Outlook 失败，执行强杀")
@@ -148,6 +172,7 @@ func CalcCutoffTime(safeDelay time.Duration, retainDays int) time.Time {
 // Archive 执行一次常规归档
 func (a *Archiver) Archive(ctx context.Context, opts ArchiveOptions) (*ArchiveResult, error) {
 	start := time.Now()
+	cfg := a.getCfg()
 	res := &ArchiveResult{
 		Errors: make([]MailError, 0),
 	}
@@ -158,19 +183,26 @@ func (a *Archiver) Archive(ctx context.Context, opts ArchiveOptions) (*ArchiveRe
 		return res, nil
 	}
 
-	folders, err := a.bridge.WalkMailboxFolders(a.cfg)
+	folders, err := a.bridge.WalkMailboxFolders(&cfg)
 	if err != nil {
 		a.logger.Error("Failed to walk mailbox folders", zap.Error(err))
 		return nil, err
 	}
+	defer func() {
+		for _, f := range folders {
+			if f.Dispatch != nil {
+				comutil.SafeRelease(f.Dispatch)
+			}
+		}
+	}()
 
-	for idx, folder := range folders {
+	for _, folder := range folders {
 		if ctx.Err() != nil {
 			return res, ctx.Err()
 		}
 
 		var moved, failed int
-		_ = a.bridge.Submit(func() error {
+		_ = a.bridge.SubmitWithContext(ctx, func() error {
 			moved, failed = a.processFolder(ctx, folder, opts, res)
 			return nil
 		})
@@ -179,15 +211,6 @@ func (a *Archiver) Archive(ctx context.Context, opts ArchiveOptions) (*ArchiveRe
 
 		if opts.MaxBatchSize > 0 && res.TotalMoved >= opts.MaxBatchSize {
 			a.logger.Info("Reached max batch size, stopping archive")
-			for j := idx + 1; j < len(folders); j++ {
-				var count int
-				_ = a.bridge.Submit(func() error {
-					count = a.countMatchedItems(folders[j], opts)
-					return nil
-				})
-				res.TotalMatched += count
-				res.TotalSkipped += count
-			}
 			break
 		}
 	}
@@ -204,68 +227,14 @@ type mailMeta struct {
 func (a *Archiver) processFolder(ctx context.Context, folder outlook.FolderInfo, opts ArchiveOptions, res *ArchiveResult) (int, int) {
 	moved := 0
 	failed := 0
+	cfg := a.getCfg()
 
-	itemsVar, err := comutil.SafeGetProperty(folder.Dispatch, "Items")
+	restricted, count, cleanup, err := a.getRestrictedItems(folder, opts)
 	if err != nil {
-		a.logger.Error("Failed to get Items", zap.String("folder", folder.FullPath), zap.Error(err))
+		a.logger.Error("获取过滤后邮件失败", zap.String("folder", folder.FullPath), zap.Error(err))
 		return moved, failed
 	}
-	items := itemsVar.ToIDispatch()
-	if items == nil {
-		a.logger.Error("Items is nil", zap.String("folder", folder.FullPath))
-		return moved, failed
-	}
-	defer comutil.SafeRelease(items)
-
-	var filter string
-	if opts.SafeDelay == 0 && opts.RetainDays == 0 {
-		filter = ""
-	} else {
-		cutoffTime := CalcCutoffTime(opts.SafeDelay, opts.RetainDays)
-		filter = BuildRestrictFilter(folder.TimeField, cutoffTime)
-	}
-
-	a.logger.Debug("Restrict filter", zap.String("folder", folder.FullPath), zap.String("filter", filter))
-
-	var restricted *ole.IDispatch
-	if filter != "" {
-		restrictedVar, err := comutil.SafeCallMethod(items, "Restrict", filter)
-		if err != nil {
-			a.logger.Error("Failed to restrict Items", zap.String("folder", folder.FullPath), zap.Error(err))
-			return moved, failed
-		}
-		restricted = restrictedVar.ToIDispatch()
-	} else {
-		items.AddRef()
-		restricted = items
-	}
-	
-	if restricted == nil {
-		a.logger.Error("Restricted Items is nil", zap.String("folder", folder.FullPath))
-		return moved, failed
-	}
-	defer comutil.SafeRelease(restricted)
-
-	countVar, err := comutil.SafeGetProperty(restricted, "Count")
-	if err != nil {
-		a.logger.Error("Failed to get Count", zap.String("folder", folder.FullPath), zap.Error(err))
-		return moved, failed
-	}
-	count := 0
-	if countVar.Value() != nil {
-		switch v := countVar.Value().(type) {
-		case int32:
-			count = int(v)
-		case int:
-			count = v
-		case int16:
-			count = int(v)
-		case float64:
-			count = int(v)
-		case int64:
-			count = int(v)
-		}
-	}
+	defer cleanup()
 	res.TotalMatched += count
 
 	var metas []mailMeta
@@ -274,7 +243,7 @@ func (a *Archiver) processFolder(ctx context.Context, folder outlook.FolderInfo,
 		if ctx.Err() != nil {
 			break
 		}
-		
+
 		entryID, errID := a.bridge.GetEntryID(item)
 		if errID == nil && entryID != "" {
 			subject := a.bridge.GetSubject(item)
@@ -291,7 +260,7 @@ func (a *Archiver) processFolder(ctx context.Context, folder outlook.FolderInfo,
 		} else {
 			a.logger.Warn("Failed to get EntryID in snapshot", zap.Error(errID))
 		}
-		
+
 		nextItem, _ := a.bridge.GetNext(restricted)
 		comutil.SafeRelease(item)
 		item = nextItem
@@ -299,6 +268,13 @@ func (a *Archiver) processFolder(ctx context.Context, folder outlook.FolderInfo,
 	if item != nil {
 		comutil.SafeRelease(item)
 	}
+
+	pstCache := make(map[string]*ole.IDispatch)
+	defer func() {
+		for _, root := range pstCache {
+			comutil.SafeRelease(root)
+		}
+	}()
 
 	for i := len(metas) - 1; i >= 0; i-- {
 		meta := metas[i]
@@ -339,7 +315,9 @@ func (a *Archiver) processFolder(ctx context.Context, folder outlook.FolderInfo,
 		}
 
 		// Ensure PST is mounted and Folder exists
-		pstRoot, err := a.bridge.EnsurePSTMounted(quarter, a.cfg.PSTRootPath)
+		pstRoot, ok := pstCache[quarter.PSTFileName()]
+		if !ok {
+		pstRoot, err = a.bridge.EnsurePSTMounted(quarter, cfg.PSTRootPath)
 		if err != nil {
 			a.logger.Error("Failed to ensure PST mounted", zap.Error(err))
 			res.Errors = append(res.Errors, MailError{Subject: meta.subject, Err: err})
@@ -347,39 +325,21 @@ func (a *Archiver) processFolder(ctx context.Context, folder outlook.FolderInfo,
 			failed++
 			continue
 		}
-
-		folderPath := folder.FullPath
-		isDeletedItems := false
-		if folderPath == "已删除邮件" || strings.EqualFold(folderPath, "deleted items") {
-			folderPath = "已删除邮件_备份"
-			isDeletedItems = true
+		pstCache[quarter.PSTFileName()] = pstRoot
+		a.checkPSTSize(quarter) // M12：挂载目标 PST 后检查大小并告警
 		}
 
+		folderPath := folder.FullPath
 		targetFolder, err := a.bridge.EnsurePSTFolder(pstRoot, folderPath)
 		if err != nil {
 			a.logger.Error("Failed to ensure PST folder", zap.Error(err))
 			res.Errors = append(res.Errors, MailError{Subject: meta.subject, Err: err})
-			comutil.SafeRelease(pstRoot)
 			itemRef.Release()
 			failed++
 			continue
 		}
 
-		if isDeletedItems {
-			err = a.bridge.CopyItem(itemRef.Dispatch(), targetFolder)
-			if err != nil {
-				a.logger.Error("Failed to copy deleted item", zap.String("subject", meta.subject), zap.Error(err))
-				res.Errors = append(res.Errors, MailError{Subject: meta.subject, Err: err})
-				failed++
-			} else {
-				err = a.bridge.DeleteItem(itemRef.Dispatch())
-				if err != nil {
-					a.logger.Error("Failed to delete source item after copy", zap.String("subject", meta.subject), zap.Error(err))
-				}
-				a.logger.Info("Moved deleted mail via copy+delete", zap.String("subject", meta.subject), zap.String("target_pst", quarter.PSTFileName()))
-				moved++
-			}
-		} else if opts.CopyOnly {
+		if opts.CopyOnly {
 			err = a.bridge.CopyItem(itemRef.Dispatch(), targetFolder)
 			if err != nil {
 				a.logger.Error("Failed to copy item", zap.String("subject", meta.subject), zap.Error(err))
@@ -402,7 +362,7 @@ func (a *Archiver) processFolder(ctx context.Context, folder outlook.FolderInfo,
 		}
 
 		comutil.SafeRelease(targetFolder)
-		comutil.SafeRelease(pstRoot)
+		// 不在这里 Release pstRoot，在 defer 中统一释放
 		itemRef.Release()
 
 		time.Sleep(opts.MoveInterval)
@@ -411,46 +371,58 @@ func (a *Archiver) processFolder(ctx context.Context, folder outlook.FolderInfo,
 	return moved, failed
 }
 
-func (a *Archiver) countMatchedItems(folder outlook.FolderInfo, opts ArchiveOptions) int {
+func (a *Archiver) getRestrictedItems(folder outlook.FolderInfo, opts ArchiveOptions) (*ole.IDispatch, int, func(), error) {
 	itemsVar, err := comutil.SafeGetProperty(folder.Dispatch, "Items")
 	if err != nil {
-		return 0
+		return nil, 0, nil, err
 	}
 	items := itemsVar.ToIDispatch()
 	if items == nil {
-		return 0
+		itemsVar.Clear()
+		return nil, 0, nil, fmt.Errorf("Items is nil")
 	}
-	defer comutil.SafeRelease(items)
 
 	var filter string
-	if opts.SafeDelay == 0 && opts.RetainDays == 0 {
-		filter = ""
-	} else {
+	if opts.SafeDelay > 0 || opts.RetainDays > 0 {
 		cutoffTime := CalcCutoffTime(opts.SafeDelay, opts.RetainDays)
 		filter = BuildRestrictFilter(folder.TimeField, cutoffTime)
 	}
 
 	var restricted *ole.IDispatch
+	var restrictedVar *ole.VARIANT
 	if filter != "" {
-		restrictedVar, err := comutil.SafeCallMethod(items, "Restrict", filter)
+		restrictedVar, err = comutil.SafeCallMethod(items, "Restrict", filter)
 		if err != nil {
-			return 0
+			comutil.SafeRelease(items)
+			itemsVar.Clear()
+			return nil, 0, nil, err
 		}
 		restricted = restrictedVar.ToIDispatch()
 	} else {
 		items.AddRef()
 		restricted = items
 	}
-	
+
 	if restricted == nil {
-		return 0
+		if restrictedVar != nil {
+			restrictedVar.Clear()
+		}
+		comutil.SafeRelease(items)
+		itemsVar.Clear()
+		return nil, 0, nil, fmt.Errorf("Restricted items is nil")
 	}
-	defer comutil.SafeRelease(restricted)
 
 	countVar, err := comutil.SafeGetProperty(restricted, "Count")
 	if err != nil {
-		return 0
+		comutil.SafeRelease(restricted)
+		if restrictedVar != nil {
+			restrictedVar.Clear()
+		}
+		comutil.SafeRelease(items)
+		itemsVar.Clear()
+		return nil, 0, nil, err
 	}
+
 	count := 0
 	if countVar.Value() != nil {
 		switch v := countVar.Value().(type) {
@@ -466,5 +438,16 @@ func (a *Archiver) countMatchedItems(folder outlook.FolderInfo, opts ArchiveOpti
 			count = int(v)
 		}
 	}
-	return count
+
+	cleanup := func() {
+		countVar.Clear()
+		comutil.SafeRelease(restricted)
+		if restrictedVar != nil {
+			restrictedVar.Clear()
+		}
+		comutil.SafeRelease(items)
+		itemsVar.Clear()
+	}
+
+	return restricted, count, cleanup, nil
 }

@@ -64,7 +64,9 @@ func LoadConfig(path string) (*Config, bool, error) {
 		if os.IsNotExist(err) {
 			isFirstRun = true
 			// 如果配置文件不存在，则创建默认配置文件
-			_ = os.MkdirAll(config.PSTRootPath, 0755)
+			if err := os.MkdirAll(config.PSTRootPath, 0755); err != nil {
+				return nil, false, fmt.Errorf("failed to create default pst_root_path: %w", err)
+			}
 			err = SaveConfig(path, config)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to save default config to %s: %v. Using in-memory default.\n", path, err)
