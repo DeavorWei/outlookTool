@@ -110,6 +110,10 @@ func (a *Archiver) ExecuteIndependentDeletion() {
 	}
 	a.logger.Info("开始执行独立删除流程，准备关闭 Outlook", zap.Int("count", len(pending)))
 
+	// 0. 即将重启 Outlook，预先令 Namespace 缓存失效，避免悬空代理
+	//    （QuitOutlook 内部也会失效，此处显式调用作为防御性兜底）
+	a.bridge.InvalidateNamespaceCache()
+
 	// 1. 尝试优雅关闭
 	a.bridge.QuitOutlook()
 

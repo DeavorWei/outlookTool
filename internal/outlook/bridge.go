@@ -14,6 +14,8 @@ import (
 	"github.com/go-ole/go-ole/oleutil"
 	"go.uber.org/zap"
 	"golang.org/x/sys/windows"
+
+	"outlook-archiver/pkg/comutil"
 )
 
 type comTask struct {
@@ -26,6 +28,12 @@ type COMBridge struct {
 	taskCh   chan comTask // 所有 COM 操作通过此 channel 提交
 	threadID uint32
 	logger   *zap.Logger
+
+	// MAPI Namespace 单例缓存。
+	// 约束：仅在 COM 线程访问（所有读写均位于 b.Submit 闭包内），无需加锁。
+	// 缓存自身持有一份引用，调用方通过 AddRef 获得独立引用。
+	cachedApp *ole.IDispatch // Outlook.Application 的 IDispatch
+	cachedNS  *ole.IDispatch // Namespace("MAPI") 的 IDispatch
 }
 
 // NewCOMBridge 创建一个新的 COMBridge
@@ -49,6 +57,9 @@ func (b *COMBridge) Run(ctx context.Context, ready chan<- struct{}) {
 	close(ready)
 
 	defer func() {
+		// 释放缓存的 COM 对象（必须在 CoUninitialize 之前，此时 COM 仍可用）
+		b.invalidateNamespace()
+
 		// 排空 taskCh，让等待的 Submit 收到错误
 		for {
 			select {
@@ -173,6 +184,9 @@ func (b *COMBridge) GetActiveOutlook() (*ole.IDispatch, error) {
 // QuitOutlook 尝试通过 COM 接口优雅关闭 Outlook
 func (b *COMBridge) QuitOutlook() error {
 	return b.Submit(func() error {
+		// 即将关闭 Outlook，预先令 Namespace 缓存失效，避免悬空代理
+		b.invalidateNamespace()
+
 		unknown, errGet := oleutil.GetActiveObject("Outlook.Application")
 		if errGet != nil {
 			return nil // 已经没有运行，或者无法获取，则视作已经关闭
@@ -186,6 +200,32 @@ func (b *COMBridge) QuitOutlook() error {
 
 		_, errCall := oleutil.CallMethod(disp, "Quit")
 		return errCall
+	})
+}
+
+// invalidateNamespace 释放并清空缓存的 Application 与 Namespace。
+//
+// 必须在 COM 线程调用。调用后下一次 getNamespace 会重新走冷启动路径。
+// 幂等：对 nil 字段调用 SafeRelease 是安全的。
+func (b *COMBridge) invalidateNamespace() {
+	if b.cachedNS != nil {
+		comutil.SafeRelease(b.cachedNS)
+		b.cachedNS = nil
+	}
+	if b.cachedApp != nil {
+		comutil.SafeRelease(b.cachedApp)
+		b.cachedApp = nil
+	}
+}
+
+// InvalidateNamespaceCache 清空 MAPI Namespace 缓存（外部调用入口）。
+//
+// 供非 COM 线程的调用方在 Outlook 进程即将被重启时调用。
+// 通过 Submit 派发到 COM 线程执行，保证缓存字段的读写线程安全。
+func (b *COMBridge) InvalidateNamespaceCache() {
+	_ = b.Submit(func() error {
+		b.invalidateNamespace()
+		return nil
 	})
 }
 
