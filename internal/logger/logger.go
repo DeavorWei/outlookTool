@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -16,7 +18,8 @@ import (
 var CurrentLogDir string
 
 // LogBroadcast 广播实时日志的通道
-var LogBroadcast = make(chan string, 200)
+var LogBroadcast = make(chan string, 1000)
+var dropCount int32
 
 type broadcastSyncer struct{}
 
@@ -25,6 +28,7 @@ func (b *broadcastSyncer) Write(p []byte) (n int, err error) {
 	select {
 	case LogBroadcast <- string(p):
 	default:
+		atomic.AddInt32(&dropCount, 1)
 	}
 	return len(p), nil
 }
@@ -43,11 +47,11 @@ func InitLogger(cfg *config.Config) (*zap.Logger, error) {
 	CurrentLogDir = logDir
 
 	w := &lumberjack.Logger{
-		Filename:   filepath.Join(logDir, "archiver.log"),
-		MaxSize:    50,                   // MB
-		MaxAge:     cfg.LogRetentionDays, // 天
-		LocalTime:  true,
-		Compress:   false,
+		Filename:  filepath.Join(logDir, "archiver.log"),
+		MaxSize:   50,                   // MB
+		MaxAge:    cfg.LogRetentionDays, // 天
+		LocalTime: true,
+		Compress:  false,
 	}
 
 	encoderConfig := zap.NewProductionEncoderConfig()
@@ -81,7 +85,22 @@ func InitLogger(cfg *config.Config) (*zap.Logger, error) {
 	)
 
 	core := zapcore.NewTee(fileCore, consoleCore, broadcastCore)
-	return zap.New(core, zap.AddCaller()), nil
+	logger := zap.New(core, zap.AddCaller())
+	// M8：周期上报被丢弃的实时日志条数，避免静默丢日志
+	go reportDroppedLogs(logger)
+	return logger, nil
+}
+
+// reportDroppedLogs 周期上报被丢弃的实时日志条数（SSE 广播通道溢出时会发生）
+func reportDroppedLogs(logger *zap.Logger) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		dropped := atomic.SwapInt32(&dropCount, 0)
+		if dropped > 0 && logger != nil {
+			logger.Warn("日志广播通道溢出，部分实时日志已被丢弃", zap.Int32("dropped_count", dropped))
+		}
+	}
 }
 
 func exeDir() string {
@@ -91,8 +110,9 @@ func exeDir() string {
 		return cwd
 	}
 	dir := filepath.Dir(exePath)
-	// 判断是否在 go run 或临时编译目录下运行
-	if strings.Contains(dir, os.TempDir()) || strings.Contains(dir, "Temp") || strings.Contains(dir, "tmp") {
+	dirLower := strings.ToLower(dir)
+	// 仅依据系统临时目录前缀判定（避免 "temp"/"tmp" 子串误判，如 "mytemplate" 目录）
+	if strings.Contains(dirLower, strings.ToLower(os.TempDir())) {
 		cwd, err := os.Getwd()
 		if err == nil {
 			return cwd

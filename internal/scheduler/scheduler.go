@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -20,7 +21,6 @@ const (
 	StateArchiving
 	StateReorganizing
 	StateRestoring
-	StatePaused
 )
 
 // ProgressInfo 进度信息（供托盘 Tooltip 显示）
@@ -31,11 +31,13 @@ type ProgressInfo struct {
 	CurrentPST string
 }
 
-// ConfigProvider 允许托盘安全获取当前生效的配置副本
+// ConfigProvider 允许安全获取当前生效的配置副本
 func (s *Scheduler) GetConfigCopy() config.Config {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return *s.cfg
+	val := s.cfgVal.Load()
+	if cfg, ok := val.(*config.Config); ok && cfg != nil {
+		return *cfg
+	}
+	return config.Config{}
 }
 
 // GetMountedPSTs delegates to Archiver to fetch mounted PSTs
@@ -46,25 +48,28 @@ func (s *Scheduler) GetMountedPSTs() ([]string, error) {
 // ReloadConfig 从文件重新加载配置
 func (s *Scheduler) ReloadConfig(path string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	
 	if s.state != StateIdle {
+		s.mu.Unlock()
 		return fmt.Errorf("当前状态不可重新加载配置，请在空闲时重试")
 	}
+	s.mu.Unlock() // 检查状态后释放，避免 IO 阻塞
 
 	newCfg, _, err := config.LoadConfig(path)
 	if err != nil {
 		return err
 	}
 
-	// 就地更新所有字段，使得持有 cfg 指针的其他组件(archiver/reorg)能读取到新值
-	*s.cfg = *newCfg
+	// 原子替换
+	s.cfgVal.Store(newCfg)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	// 更新日志级别等如果需要的话（暂时略过复杂的 logger 热更）
-	
+
 	// 重置定时器间隔
 	if s.ticker != nil {
-		interval := time.Duration(s.cfg.PollIntervalMin) * time.Minute
+		interval := time.Duration(newCfg.PollIntervalMin) * time.Minute
 		if interval <= 0 {
 			interval = 60 * time.Minute
 		}
@@ -76,7 +81,7 @@ func (s *Scheduler) ReloadConfig(path string) error {
 }
 
 type Scheduler struct {
-	cfg      *config.Config
+	cfgVal   atomic.Value
 	archiver *archiver.Archiver
 	reorg    *archiver.Reorganizer
 	logger   *zap.Logger
@@ -87,14 +92,15 @@ type Scheduler struct {
 }
 
 func NewScheduler(cfg *config.Config, arc *archiver.Archiver, reorg *archiver.Reorganizer, logger *zap.Logger) *Scheduler {
-	return &Scheduler{
-		cfg:      cfg,
+	s := &Scheduler{
 		archiver: arc,
 		reorg:    reorg,
 		logger:   logger,
 		state:    StateIdle,
 		stopCh:   make(chan struct{}),
 	}
+	s.cfgVal.Store(cfg)
+	return s
 }
 
 // Start 启动定时调度
@@ -104,7 +110,8 @@ func (s *Scheduler) Start(ctx context.Context) {
 		s.mu.Unlock()
 		return // already started
 	}
-	interval := time.Duration(s.cfg.PollIntervalMin) * time.Minute
+	cfg := s.GetConfigCopy()
+	interval := time.Duration(cfg.PollIntervalMin) * time.Minute
 	if interval <= 0 {
 		interval = 60 * time.Minute // default fallback
 	}
@@ -160,8 +167,9 @@ func (s *Scheduler) TriggerOnce(ctx context.Context) error {
 
 	s.logger.Info("开始常规归档任务")
 
+	cfg := s.GetConfigCopy()
 	// 检查磁盘空间
-	status, err := monitor.CheckDiskSpace(s.cfg.PSTRootPath)
+	status, err := monitor.CheckDiskSpace(cfg.PSTRootPath)
 	if err != nil {
 		s.logger.Error("检查磁盘空间失败", zap.Error(err))
 		return err
@@ -175,12 +183,12 @@ func (s *Scheduler) TriggerOnce(ctx context.Context) error {
 	}
 
 	opts := archiver.ArchiveOptions{
-		MaxBatchSize: s.cfg.MaxBatchSize,
-		SafeDelay:    time.Duration(s.cfg.SafeDelayMin) * time.Minute,
-		RetainDays:   s.cfg.RetainDays,
-		MoveInterval: time.Duration(s.cfg.MoveIntervalMs) * time.Millisecond,
-		DryRun:       s.cfg.DryRun,
-		CopyOnly:     s.cfg.CopyOnly,
+		MaxBatchSize: cfg.MaxBatchSize,
+		SafeDelay:    time.Duration(cfg.SafeDelayMin) * time.Minute,
+		RetainDays:   cfg.RetainDays,
+		MoveInterval: time.Duration(cfg.MoveIntervalMs) * time.Millisecond,
+		DryRun:       cfg.DryRun,
+		CopyOnly:     cfg.CopyOnly,
 	}
 
 	res, err := s.archiver.Archive(ctx, opts)
@@ -214,7 +222,8 @@ func (s *Scheduler) TriggerReorganize(ctx context.Context, progressCb func(Progr
 		s.state = StateIdle
 		if s.ticker != nil {
 			// 恢复定时器
-			interval := time.Duration(s.cfg.PollIntervalMin) * time.Minute
+			cfg := s.GetConfigCopy()
+			interval := time.Duration(cfg.PollIntervalMin) * time.Minute
 			if interval <= 0 {
 				interval = 60 * time.Minute
 			}
@@ -225,8 +234,9 @@ func (s *Scheduler) TriggerReorganize(ctx context.Context, progressCb func(Progr
 
 	s.logger.Info("开始全量整理任务")
 
+	cfg := s.GetConfigCopy()
 	// 检查磁盘空间
-	status, err := monitor.CheckDiskSpace(s.cfg.PSTRootPath)
+	status, err := monitor.CheckDiskSpace(cfg.PSTRootPath)
 	if err != nil {
 		s.logger.Error("检查磁盘空间失败", zap.Error(err))
 		return err
@@ -282,7 +292,8 @@ func (s *Scheduler) TriggerRestore(ctx context.Context, req RestoreRequest) erro
 		s.mu.Lock()
 		s.state = StateIdle
 		if s.ticker != nil {
-			interval := time.Duration(s.cfg.PollIntervalMin) * time.Minute
+			cfg := s.GetConfigCopy()
+			interval := time.Duration(cfg.PollIntervalMin) * time.Minute
 			if interval <= 0 {
 				interval = 60 * time.Minute
 			}

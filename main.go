@@ -46,19 +46,30 @@ func main() {
 	zlog.Info("Outlook Auto-Archiver 启动中...")
 
 	// 4. 初始化 COM 桥接层
-	comBridge := outlook.NewCOMBridge()
+	comBridge := outlook.NewCOMBridge(zlog)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// 启动 COM 线程
-	go comBridge.Run(ctx)
+	// 启动 COM 线程并等待就绪
+	ready := make(chan struct{})
+	go comBridge.Run(ctx, ready)
+	<-ready
 
 	// 5. 初始化核心引擎
-	arc := archiver.NewArchiver(cfg, comBridge, zlog)
-	reorg := archiver.NewReorganizer(cfg, comBridge, arc, zlog)
+	// 配置提供方：实时返回调度器当前生效配置（支持热重载）。
+	// 通过闭包引用 sched，需在调度器构造后再赋值（见下方），归档/整理逻辑即可拿到最新配置。
+	var sched *scheduler.Scheduler
+	cfgProvider := func() config.Config {
+		if sched == nil {
+			return config.Config{}
+		}
+		return sched.GetConfigCopy()
+	}
+	arc := archiver.NewArchiver(cfgProvider, comBridge, zlog)
+	reorg := archiver.NewReorganizer(cfgProvider, comBridge, arc, zlog)
 
 	// 6. 初始化调度器
-	sched := scheduler.NewScheduler(cfg, arc, reorg, zlog)
+	sched = scheduler.NewScheduler(cfg, arc, reorg, zlog)
 	sched.Start(ctx)
 	defer sched.Stop()
 
@@ -66,7 +77,7 @@ func main() {
 	tray.InitTray(sched, cfg, zlog, isFirstRun)
 
 	zlog.Info("正在停止后台任务...")
-	cancel() // 取消 context，通知各组件停止
+	cancel()     // 取消 context，通知各组件停止
 	sched.Stop() // 显式停止调度器
 
 	// 等待正在进行的任务结束 (最多等待 5 秒)
@@ -81,7 +92,7 @@ func main() {
 	select {
 	case <-waitCh:
 		zlog.Info("所有后台任务已优雅完成")
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		zlog.Warn("等待后台任务超时，强制退出")
 	}
 

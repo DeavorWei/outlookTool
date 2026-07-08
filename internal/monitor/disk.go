@@ -1,24 +1,24 @@
 package monitor
 
 import (
-	"os"
 	"golang.org/x/sys/windows"
+	"os"
 )
 
 type DiskStatus int
 
 const (
-	DiskOK DiskStatus = iota
-	DiskWarning  // < 1GB
-	DiskCritical // < 500MB
+	DiskOK       DiskStatus = iota
+	DiskWarning             // < 1GB
+	DiskCritical            // < 500MB
 )
 
 type PSTSizeStatus int
 
 const (
-	PSTSizeOK PSTSizeStatus = iota
-	PSTSizeWarning  // > 15GB
-	PSTSizeCritical // > 20GB
+	PSTSizeOK       PSTSizeStatus = iota
+	PSTSizeWarning                // > 15GB
+	PSTSizeCritical               // > 20GB
 )
 
 // CheckDiskSpace 检查目标目录可用空间
