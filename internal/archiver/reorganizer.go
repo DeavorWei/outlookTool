@@ -259,6 +259,7 @@ func (r *Reorganizer) processPST(ctx context.Context, pstPath string, res *Recti
 	}
 	defer comutil.SafeRelease(pstRoot)
 
+	r.logger.Info("正在扫描该 PST 内的所有文件夹结构，请稍候...", zap.String("path", pstPath))
 	// 遍历文件夹
 	folders, err := r.bridge.WalkPSTFolders(pstRoot)
 	if err != nil {
@@ -300,6 +301,7 @@ func (r *Reorganizer) processPSTFolder(ctx context.Context, folder outlook.Folde
 	}
 	defer comutil.SafeRelease(items)
 
+	r.logger.Info("正在获取文件夹内的邮件集合并应用过滤条件", zap.String("folder", folder.FullPath))
 	// 不再限制 IPM.Note 类型的邮件，获取所有类型对象
 	items.AddRef()
 	restricted := items
@@ -314,6 +316,7 @@ func (r *Reorganizer) processPSTFolder(ctx context.Context, folder outlook.Folde
 		return
 	}
 
+	r.logger.Info("正在请求 Outlook 对邮件进行排序，该操作可能比较耗时", zap.String("folder", folder.FullPath))
 	// M5：显式排序，保证倒序遍历语义正确
 	if err := r.bridge.SortItems(restricted, folder.TimeField, true); err != nil {
 		r.logger.Warn("排序集合失败，回退为索引顺序", zap.String("folder", folder.FullPath), zap.Error(err))
@@ -344,6 +347,7 @@ func (r *Reorganizer) processPSTFolder(ctx context.Context, folder outlook.Folde
 			start = 1
 		}
 
+		r.logger.Info(fmt.Sprintf("正在拉取邮件数据快照 [%d - %d] (共 %d 封)，请耐心等待拉取完成...", start, end, end-start+1), zap.String("folder", folder.FullPath))
 		// 收集本块紧凑快照
 		block := make([]compactMeta, 0, end-start+1)
 		for i := start; i <= end; i++ {
@@ -366,6 +370,8 @@ func (r *Reorganizer) processPSTFolder(ctx context.Context, folder outlook.Folde
 				continue
 			}
 			comutil.SafeRelease(item)
+			
+			r.logger.Debug("成功读取单封邮件快照", zap.Int("index", i), zap.String("subject", subject), zap.Time("mail_time", mailTime))
 			block = append(block, compactMeta{
 				entryID: entryID,
 				subject: subject,

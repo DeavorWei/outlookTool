@@ -187,6 +187,7 @@ func (a *Archiver) Archive(ctx context.Context, opts ArchiveOptions) (*ArchiveRe
 		return res, nil
 	}
 
+	a.logger.Info("正在扫描整个邮箱文件夹树，请稍候...")
 	folders, err := a.bridge.WalkMailboxFolders(&cfg)
 	if err != nil {
 		a.logger.Error("Failed to walk mailbox folders", zap.Error(err))
@@ -236,6 +237,7 @@ func (a *Archiver) processFolder(ctx context.Context, folder outlook.FolderInfo,
 	failed := 0
 	cfg := a.getCfg()
 
+	a.logger.Info("正在获取文件夹内的邮件集合并应用过滤条件", zap.String("folder", folder.FullPath))
 	restricted, count, cleanup, err := a.getRestrictedItems(folder, opts)
 	if err != nil {
 		a.logger.Error("获取过滤后邮件失败", zap.String("folder", folder.FullPath), zap.Error(err))
@@ -248,6 +250,7 @@ func (a *Archiver) processFolder(ctx context.Context, folder outlook.FolderInfo,
 		return moved, failed
 	}
 
+	a.logger.Info("正在请求 Outlook 对邮件进行排序，该操作可能比较耗时", zap.String("folder", folder.FullPath))
 	// M5：显式排序，保证倒序遍历语义正确（Items 默认顺序不保证按时间）
 	if err := a.bridge.SortItems(restricted, folder.TimeField, true); err != nil {
 		a.logger.Warn("排序集合失败，回退为索引顺序", zap.String("folder", folder.FullPath), zap.Error(err))
@@ -282,6 +285,7 @@ func (a *Archiver) processFolder(ctx context.Context, folder outlook.FolderInfo,
 			start = 1
 		}
 
+		a.logger.Info(fmt.Sprintf("正在拉取邮件数据快照 [%d - %d] (共 %d 封)，请耐心等待拉取完成...", start, end, end-start+1), zap.String("folder", folder.FullPath))
 		// 收集本块紧凑快照（正序索引遍历，仅 entryID + subject + 时间戳）
 		block := make([]compactMeta, 0, end-start+1)
 		for i := start; i <= end; i++ {
@@ -306,6 +310,8 @@ func (a *Archiver) processFolder(ctx context.Context, folder outlook.FolderInfo,
 				continue
 			}
 			comutil.SafeRelease(item)
+			
+			a.logger.Debug("成功读取单封邮件快照", zap.Int("index", i), zap.String("subject", subject), zap.Time("mail_time", mailTime))
 			block = append(block, compactMeta{
 				entryID: entryID,
 				subject: subject,

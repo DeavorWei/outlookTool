@@ -156,10 +156,12 @@ func onReady(sched *scheduler.Scheduler, cfg *config.Config, zlog *zap.Logger, i
 			case <-trayCtx.Done():
 				return
 			case <-mArchiveOnce.ClickedCh:
+				zlog.Info("用户操作: 点击 [立即执行一次]")
 				if sched != nil {
 					_ = sched.TriggerOnce(trayCtx)
 				}
 			case <-mReorganize.ClickedCh:
+				zlog.Info("用户操作: 点击 [全量整理]")
 				if sched != nil {
 					// 触发全量整理，并传入进度更新回调
 					_ = sched.TriggerReorganize(trayCtx, func(info scheduler.ProgressInfo) {
@@ -167,16 +169,19 @@ func onReady(sched *scheduler.Scheduler, cfg *config.Config, zlog *zap.Logger, i
 					})
 				}
 			case <-mOpenLog.ClickedCh:
+				zlog.Info("用户操作: 点击 [打开日志目录]")
 				if logger.CurrentLogDir != "" {
 					exec.Command("explorer", logger.CurrentLogDir).Start()
 				}
 			case <-mOpenConfig.ClickedCh:
+				zlog.Info("用户操作: 点击 [打开配置文件]")
 				exeDir, err := os.Executable()
 				if err == nil {
 					configPath := filepath.Join(filepath.Dir(exeDir), "config.yaml")
 					exec.Command("cmd", "/c", "start", "", configPath).Start()
 				}
 			case <-mReloadConfig.ClickedCh:
+				zlog.Info("用户操作: 点击 [重新加载配置]")
 				if sched != nil {
 					exeDir, err := os.Executable()
 					if err == nil {
@@ -191,6 +196,7 @@ func onReady(sched *scheduler.Scheduler, cfg *config.Config, zlog *zap.Logger, i
 					}
 				}
 			case <-mWebConfig.ClickedCh:
+				zlog.Info("用户操作: 点击 [Web 配置中心]")
 				if mWebConfig.Checked() {
 					// Stop the server
 					ws.Stop()
@@ -207,6 +213,7 @@ func onReady(sched *scheduler.Scheduler, cfg *config.Config, zlog *zap.Logger, i
 					}
 				}
 			case <-mAutoStart.ClickedCh:
+				zlog.Info("用户操作: 点击 [开机自启]")
 				if mAutoStart.Checked() {
 					err := registry.SetAutoStart(false)
 					if err == nil {
@@ -225,6 +232,7 @@ func onReady(sched *scheduler.Scheduler, cfg *config.Config, zlog *zap.Logger, i
 					}
 				}
 			case <-mQuit.ClickedCh:
+				zlog.Info("用户操作: 点击 [退出]")
 				if sched != nil && sched.GetState() == scheduler.StateReorganizing {
 					zlog.Warn("全量整理中，禁止退出")
 					continue

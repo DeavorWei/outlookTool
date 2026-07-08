@@ -54,9 +54,15 @@ func (b *COMBridge) Run(ctx context.Context, ready chan<- struct{}) {
 	ole.CoInitializeEx(0, ole.COINIT_APARTMENTTHREADED)
 	defer ole.CoUninitialize()
 
+	if b.logger != nil {
+		b.logger.Info("COM 桥接工作线程已就绪，等待执行底层任务...")
+	}
 	close(ready)
 
 	defer func() {
+		if b.logger != nil {
+			b.logger.Info("COM 桥接工作线程正在安全退出...")
+		}
 		// 释放缓存的 COM 对象（必须在 CoUninitialize 之前，此时 COM 仍可用）
 		b.invalidateNamespace()
 
