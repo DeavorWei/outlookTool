@@ -344,6 +344,19 @@ func (a *Archiver) processFolder(ctx context.Context, folder outlook.FolderInfo,
 			mailTime := time.Unix(m.ts, 0)
 			quarter := router.CalcQuarter(mailTime)
 
+			// 增加严格的 Go 层日期校验。因为 Outlook COM 的 Restrict(Date) 可能会受本地系统日期格式(Locale)影响，
+			// 如果 Restrict 失效可能会返回过多的邮件，导致本不该归档的近期邮件被归档。
+			cutoffTime := CalcCutoffTime(opts.SafeDelay, opts.RetainDays)
+			if !mailTime.Before(cutoffTime) {
+				a.logger.Debug("邮件因未达到保留时间被跳过(双重校验)",
+					zap.String("subject", m.subject),
+					zap.Time("mail_time", mailTime),
+					zap.Time("cutoff", cutoffTime))
+				itemRef.Release()
+				res.TotalSkipped++
+				continue
+			}
+
 			if opts.DryRun {
 				action := "move"
 				if opts.CopyOnly {
